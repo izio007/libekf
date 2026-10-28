@@ -1,0 +1,49 @@
+function result=nav_terrain_sequence(paths,series,map,limits)
+% Сравнение заданных возможных траекторий со всей последовательностью радиовысот.
+% paths — ячейки: строки вариантов, столбцы моментов; в ячейке состояние p,q,t,frame_id.
+% series.covariance — полная погрешность последовательности, включая карту и временные связи.
+assert(iscell(paths)&&~isempty(paths)&&size(paths,2)==numel(series.t), ...
+    'libekf:TerrainSequence','Expected one state per candidate and measurement time.');
+t=series.t(:); z=series.z(:); n=numel(t);
+assert(n>=2&&numel(z)==n&&all(isfinite([t;z]))&&all(diff(t)>0)&&all(z>=0) && ...
+    strcmp(series.unit,'m')&&strcmp(series.quality,'VALID')&& ...
+    ischar(series.source)&&~isempty(series.source)&&iscell(series.lineage)&& ...
+    numel(series.lineage)==n&&all(cellfun(@(x)ischar(x)&&~isempty(x),series.lineage))&& ...
+    numel(unique(series.lineage))==n,'libekf:TerrainSequence','Invalid sequence or repeated source records.');
+assert(isequal(map.coverage_complete,true)&&strcmp(map.quality,'VALID')&& ...
+    isequal(map.nearest_return_valid,true),'libekf:TerrainCoverage','Unverified terrain coverage or echo model.');
+assert(isscalar(map.max_valid_range)&&isfinite(map.max_valid_range)&&map.max_valid_range>0&& ...
+    all(z<=map.max_valid_range),'libekf:RadarRange','Sequence exceeds radar range.');
+assert(numel(map.lever)==3&&all(isfinite(map.lever))&& ...
+    isscalar(limits.absolute)&&isfinite(limits.absolute)&&limits.absolute>0&& ...
+    isscalar(limits.difference)&&isfinite(limits.difference)&&limits.difference>=0, ...
+    'libekf:TerrainSequence','Invalid lever or explicit comparison limits.');
+R=series.covariance;
+assert(isequal(size(R),[n n])&&all(isfinite(R(:)))&& ...
+    norm(R-R.','fro')<=1e-12*max(norm(R,'fro'),realmin)&&all(diag(R)>0), ...
+    'libekf:Covariance','Invalid sequence covariance.');
+d=sqrt(diag(R)); A=(R./d)./d.'; [L,flag]=chol((A+A.')/2,'lower');
+assert(flag==0,'libekf:Covariance','Sequence covariance must be positive definite.');
+count=size(paths,1); predicted=NaN(count,n); score=Inf(count,1);
+for j=1:count
+    for k=1:n
+        s=paths{j,k};
+        assert(s.t==t(k)&&strcmp(s.frame_id,map.frame_id), ...
+            'libekf:Epoch','Candidate must match measurement time and map frame.');
+        C=nav_rotation(s.q);
+        hit=nav_terrain_footprint(s.p(:)+C*map.lever(:),C*map.beam_body(:), ...
+            map.half_angle,map.vertices,map.faces,0);
+        % Для поиска нужен скаляр дальности; производная на ребре не требуется.
+        predicted(j,k)=hit.range;
+    end
+    if all(isfinite(predicted(j,:)))&&all(predicted(j,:)<=map.max_valid_range)
+        u=L\((z-predicted(j,:).')./d); score(j)=u.'*u;
+    end
+end
+best=min(score); survivors=find(isfinite(score)&score<=limits.absolute&score<=best+limits.difference);
+status='NO_MATCH';
+if numel(survivors)>1, status='AMBIGUOUS'; elseif numel(survivors)==1, status='ONE_CANDIDATE'; end
+result=struct('status',status,'candidates',survivors,'score',score,'predicted',predicted, ...
+    't',t(end),'lineage',{series.lineage});
+% ONE_CANDIDATE относится только к предоставленному набору, не ко всей области поиска.
+end
