@@ -4,7 +4,7 @@ base=fileparts(mfilename('fullpath')); addpath(fullfile(base,'function'));
 cases={@requirement_source_models,@requirement_coordinates_and_terrain, ...
     @requirement_numerical_invariance,@requirement_broad_radar,@requirement_common_correction, ...
     @requirement_source_provenance,@requirement_inertial_motion,@requirement_watch_intervals, ...
-    @requirement_terrain_sequence,@requirement_all_source_fusion,@requirement_relative_camera_motion,@requirement_joint_correction,@requirement_visual_ambiguity,@requirement_correlated_measurement,@requirement_source_comparison,@requirement_navigation_outage};
+    @requirement_terrain_sequence,@requirement_all_source_fusion,@requirement_relative_camera_motion,@requirement_joint_correction,@requirement_visual_ambiguity,@requirement_correlated_measurement,@requirement_source_comparison,@requirement_navigation_outage,@requirement_interval_observations,@requirement_observable_quantities};
 names={'Показания соответствуют физическим моделям источников', ...
     'Смена координат сохраняет результат; неоднозначность рельефа не скрывается', ...
     'Мера расхождения сохраняется при смене единиц и масштаба', ...
@@ -20,7 +20,9 @@ names={'Показания соответствуют физическим мо�
     'Альтернативное объяснение кадров сохраняет неоднозначность переноса', ...
     'Зависимость ошибки измерения от оценки учитывается явно', ...
     'Сравнение источников учитывает общие ошибки и передаёт расхождение сторожу', ...
-    'Общая оценка продолжается без спутников и отклоняет ложную координату'};
+    'Общая оценка продолжается без спутников и отклоняет ложную координату', ...
+    'Измерения внутри инерциального интервала учитываются в своё время', ...
+    'Исправные источники определяют только наблюдаемые величины'};
 checks=repmat(struct('requirement','','passed',false,'error',''),1,numel(cases));
 for k=1:numel(cases)
     checks(k).requirement=names{k};
@@ -40,7 +42,7 @@ models={'gnss_position','external_position','gnss_velocity','external_velocity',
     'gnss_position_velocity','external_position_velocity','dme_range','pseudorange', ...
     'range_rate','vor_azimuth','baro_height','airdata','radar_range','ils_angles', ...
     'gls_deviation','attitude','radar_footprint','doppler_velocity', ...
-    'adf_bearing','station_range_azimuth','range_difference','time_difference','rsdn_time_difference','magnetic_vector','optical_landmarks','celestial_pixels','cooperative_range','static_pressure'};
+    'adf_bearing','station_range_azimuth','range_difference','time_difference','rsdn_time_difference','magnetic_vector','optical_landmarks','celestial_pixels','cooperative_range','static_pressure','impact_pressure','air_pressures'};
 sensor0=struct('id',s.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
 R=nav_rotation([cos(.4);sin(.4)/sqrt(3)*ones(3,1)]); offset=[10;20;-30];
 sensor1=struct('id','rotated_sensor','origin_ecef',e.origin_ecef+e.C_e_l*offset, ...
@@ -253,7 +255,7 @@ models={'gnss_position','external_position','gnss_velocity','external_velocity',
     'gnss_position_velocity','external_position_velocity','dme_range','pseudorange', ...
     'range_rate','vor_azimuth','baro_height','airdata','radar_range','ils_angles', ...
     'gls_deviation','attitude','radar_footprint','doppler_velocity', ...
-    'adf_bearing','station_range_azimuth','range_difference','time_difference','rsdn_time_difference','magnetic_vector','optical_landmarks','celestial_pixels','cooperative_range','static_pressure'};
+    'adf_bearing','station_range_azimuth','range_difference','time_difference','rsdn_time_difference','magnetic_vector','optical_landmarks','celestial_pixels','cooperative_range','static_pressure','impact_pressure','air_pressures'};
 for k=1:numel(models)
     m=packet(s,models{k}); o=nav_measurement(s,m,e);
     assert(all(size(o.H)==[numel(o.residual),21]));
@@ -408,6 +410,46 @@ fails(@()nav_measurement(ps,pm,pe),'libekf:Atmosphere');
 pm.atmosphere.time_end=ps.t; pm.atmosphere.max_height=999;
 fails(@()nav_measurement(ps,pm,pe),'libekf:Atmosphere');
 
+% Impact pressure depends on air-relative speed and the compressible pressure ratio.
+[ps,pe]=fixture; ps.p=zeros(3,1); ps.bh=0; ps.q=[1;0;0;0];
+ps.wind=[10;20;30]; ps.v=ps.wind+[.5*sqrt(126000);0;0];
+pm=packet(ps,'impact_pressure'); pm.lever=zeros(3,1); pm.geoid_offset=0;
+pm.atmosphere.gradient=0;
+po=nav_measurement(ps,pm,pe); close(po.predicted,100000*(1.05^3.5-1),1e-7);
+close(po.H(4:6),-po.H(16:18),1e-12);
+ps.v=ps.v+[40;50;60]; ps.wind=ps.wind+[40;50;60];
+close(nav_measurement(ps,pm,pe).predicted,po.predicted,1e-7);
+ps.v=ps.wind; po=nav_measurement(ps,pm,pe);
+close(po.predicted,0,0); close(po.H,zeros(1,21),0);
+ps.wind=zeros(3,1); ps.v=[1e-5;0;0];
+close(nav_measurement(ps,pm,pe).predicted,.5*(100000/90000)*1e-10,1e-20);
+ps.v=ps.wind+[sqrt(126000);0;0];
+fails(@()nav_measurement(ps,pm,pe),'libekf:Airflow');
+ps.v=ps.wind; pm.flow_valid=false;
+fails(@()nav_measurement(ps,pm,pe),'libekf:Airflow');
+
+% Joint pressures and their equivalent static/difference coordinates carry identical information.
+[ps,pe]=fixture; ps.p=zeros(3,1); ps.bh=0; ps.q=[1;0;0;0];
+ps.wind=zeros(3,1); ps.v=[.5*sqrt(126000);0;0];
+pm=packet(ps,'air_pressures'); pm.lever=zeros(3,1); pm.geoid_offset=0;
+pm.atmosphere.gradient=0; pm.R=[400 100;100 900];
+pm.z=[100010;100000*1.05^3.5+20];
+o=nav_measurement(ps,pm,pe);
+close(o.predicted,[100000;100000*1.05^3.5],1e-7); close(o.R,pm.R,0);
+T=[1 0;-1 1]; transformed=o;
+transformed.H=T*o.H; transformed.residual=T*o.residual; transformed.R=T*o.R*T.';
+[x,Q,info]=nav_correct(ps,eye(21),o,100); assert(info.accepted);
+[y,V,info]=nav_correct(ps,eye(21),transformed,100); assert(info.accepted);
+close(x.p,y.p,1e-10); close(x.v,y.v,1e-10); close(Q,V,1e-10);
+assert(transformed.R(1,2)==-300); % Shared static pressure error cannot be discarded.
+sensor=struct('id',ps.frame_id,'origin_ecef',pe.origin_ecef,'C_e_s',pe.C_e_l);
+f=struct('state',ps,'P',eye(21),'used',{{}},'capacity',10);
+pm.frame='SENSOR_LOCAL'; pm.lineage={'static_raw','total_raw'};
+[f,info]=nav_assimilate(f,pm,sensor,pe,100); assert(info.accepted&&numel(f.used)==2);
+pm.model='impact_pressure'; pm.z=diff(pm.z); pm.R=1100; pm.units={'Pa'};
+[unchanged,info]=nav_assimilate(f,pm,sensor,pe,100);
+assert(~info.accepted&&isequal(unchanged,f));
+
 % Доплеровские проекции относятся к поверхности, а не к воздушному потоку.
 s.q=[1;0;0;0]; s.v=[3;4;5];
 m=packet(s,'doppler_velocity'); m.lever=zeros(3,1);
@@ -519,12 +561,16 @@ switch model
     case 'vor_azimuth'
         m.station=s.p-[500;400;100]; m.basis=[0 0 1;1 0 0;0 1 0];
         m.azimuth_offset=.1; m.z=0; m.R=.01; m.units={'rad'};
-    case 'static_pressure'
+    case {'static_pressure','impact_pressure','air_pressures'}
         m.geoid_offset=20; m.z=100000; m.R=400; m.units={'Pa'};
         m.pressure_valid=true; m.calibration_valid=true;
         m.atmosphere=struct('height',0,'pressure',100000,'temperature',300,'gradient',-.006, ...
             'gravity',10,'gas_constant',300,'min_height',-1000,'max_height',10000, ...
             'time_start',s.t-10,'time_end',s.t+10,'valid',true);
+        if any(strcmp(model,{'impact_pressure','air_pressures'}))
+            m.gamma=1.4; m.max_mach=.95; m.flow_valid=true; m.z=100;
+            if strcmp(model,'air_pressures'), m.z=[100000;100100]; m.R=[400 100;100 900]; m.units={'Pa';'Pa'}; end
+        end
     case 'baro_height'
         m.geoid_offset=20; m.z=1000; m.R=4; m.units={'m'};
     case 'doppler_velocity'
@@ -894,6 +940,64 @@ assert(~info.accepted&&isequal(unchanged,accepted));
 
 end
 
+function requirement_interval_observations
+[a,e]=fixture; a.p=zeros(3,1); a.v=[2;0;0]; a.q=[1;0;0;0];
+a.ba=zeros(3,1); a.bg=zeros(3,1); e.Omega=zeros(3,1);
+e.gravity_origin=zeros(3,1); e.gravity_gradient=zeros(3); e.gravity_radius=1e5;
+e.max_step=1; e.state_noise_density=zeros(21);
+u=struct('model','inertial','source','imu','lineage',{{'one_imu_interval'}},'quality','VALID', ...
+    'frame','BODY','accel_unit','m/s^2','gyro_unit','rad/s','t_start',a.t, ...
+    't_end',a.t+1,'t_received',a.t+1,'accel',zeros(3,1),'gyro',zeros(3,1), ...
+    'noise_density',zeros(6));
+f=struct('state',a,'P',eye(21),'used',{{}},'capacity',20); f=nav_save_reference(f);
+sensor=struct('id',a.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
+b=a; b.t=a.t+.5; b.p=[1;0;0];
+m=packet(b,'gnss_position'); m.frame='SENSOR_LOCAL'; m.lever=zeros(3,1);
+m.z=[2;0;0]; m.R=eye(3); m.lineage={'middle_position'};
+[x,info]=nav_assimilate_interval(f,u,{m},{sensor},e,100);
+assert(info.accepted&&info.observations{1}.accepted&&x.state.t==u.t_end);
+% Independent scalar p-v-bias state transition, conditioning at t=1/2, then to t=1.
+F=[1 .5 -.125;0 1 -.5;0 0 1]; Pmid=F*F.'; H=[1 0 0];
+K=Pmid*H.'/(H*Pmid*H.'+1); correction=F*K;
+expected=F*(Pmid-K*(H*Pmid))*F.';
+close(x.state.p(1),2+correction(1),1e-12);
+close(x.state.v(1),2+correction(2),1e-12);
+close(x.P([1 4 10],[1 4 10]),expected,1e-12);
+assert(numel(x.used)==2&&sum(strcmp(x.used,'one_imu_interval'))==1);
+close(x.P,x.jointP(22:42,22:42),0);
+% Input delivery order cannot move observations to another epoch.
+c=m; c.t_measure=a.t+.75; c.t_received=u.t_end; c.lineage={'later_position'}; c.z=[1.5;0;0];
+[y,info]=nav_assimilate_interval(f,u,{c,m},{sensor,sensor},e,100); assert(info.accepted);
+[z,info]=nav_assimilate_interval(f,u,{m,c},{sensor,sensor},e,100); assert(info.accepted);
+close(y.state.p,z.state.p,1e-12); close(y.jointP,z.jointP,1e-12);
+% Rejected observations do not stop valid inertial motion or consume source IDs.
+u.noise_density=diag([4 4 4 0 0 0]);
+bad=m; bad.quality='FAILED';
+[y,info]=nav_assimilate_interval(f,u,{bad},{sensor},e,100);
+assert(info.accepted&&~info.observations{1}.accepted&&numel(y.used)==1);
+[plain,info]=nav_assimilate(f,u,[],e,100); assert(info.accepted);
+close(y.state.p,plain.state.p,1e-12); close(y.jointP,plain.jointP,1e-12);
+% Rejected data must not change inertial quadrature during a rotating acceleration.
+u.accel=[2;1;0]; u.gyro=[0;0;.4];
+[plain,info]=nav_assimilate(f,u,[],e,100); assert(info.accepted);
+[y,info]=nav_assimilate_interval(f,u,{bad},{sensor},e,100);
+assert(info.accepted&&~info.observations{1}.accepted);
+close(y.state.p,plain.state.p,1e-12); close(y.state.v,plain.state.v,1e-12);
+close(y.jointP,plain.jointP,1e-12);
+bad.quality='VALID'; bad.z=[1e6;0;0];
+[y,info]=nav_assimilate_interval(f,u,{bad},{sensor},e,100);
+assert(info.accepted&&~info.observations{1}.accepted);
+close(y.state.p,plain.state.p,1e-12); close(y.jointP,plain.jointP,1e-12);
+% Rejected data preceding a good observation must not alter that good update either.
+[expected,info]=nav_assimilate_interval(f,u,{c},{sensor},e,100); assert(info.accepted);
+[y,info]=nav_assimilate_interval(f,u,{bad,c},{sensor,sensor},e,100);
+assert(info.accepted&&~info.observations{1}.accepted&&info.observations{2}.accepted);
+close(y.state.p,expected.state.p,1e-12); close(y.jointP,expected.jointP,1e-12);
+% Reusing a complete interval is rejected without changing the filter.
+[same,info]=nav_assimilate_interval(x,u,{m},{sensor},e,100);
+assert(~info.accepted&&isequal(same,x));
+end
+
 function requirement_relative_camera_motion
 [a,~]=fixture; a.p=zeros(3,1); a.q=[1;0;0;0]; b=a; b.t=a.t+1; b.p=[3;4;0];
 m=struct('source','camera','lineage',{{'frame100','frame101'}},'quality','VALID', ...
@@ -1078,4 +1182,60 @@ end
 assert(norm(f.state.p-[2;0;100])<.1 && norm(f.state.v-[1;0;0])<.1);
 assert(f.state.t==start+2 && all(isfinite(f.P(:))));
 assert(~ismember('satellite_10',f.used));
+end
+
+function requirement_observable_quantities
+% Two barometric readings do not separate height from their common bias.
+[s,e]=fixture; m=packet(s,'baro_height'); m.lever=zeros(3,1);
+o=nav_measurement(s,m,e); H=[o.H;o.H]; R=[4 1;1 4];
+targets=zeros(3,21); targets(1,1:3)=o.H(1:3); targets(2,19)=1; targets(3,:)=o.H;
+r=nav_observability(H,R,ones(21,1),targets,1e-10);
+assert(r.rank==1&&isequal(r.identified,[false;false;true]));
+assert(isinf(r.variance(1))&&isinf(r.variance(2))); close(r.variance(3),2.5,1e-10);
+% A separately referenced geometric height separates height and barometric bias.
+H(2,19)=0; R=diag([4 9]);
+r=nav_observability(H,R,ones(21,1),targets,1e-10);
+assert(r.rank==2&&all(r.identified)); close(r.variance,[9;13;4],1e-9);
+% Air-relative velocity identifies the difference, not ground velocity or wind separately.
+H=[eye(3) -eye(3)]; targets=[eye(3) zeros(3);zeros(3) eye(3);H];
+r=nav_observability(H,eye(3),ones(6,1),targets,1e-10);
+assert(r.rank==3&&isequal(r.identified,[false(6,1);true(3,1)]));
+close(r.variance(7:9),ones(3,1),1e-12);
+% Changing observation and state units leaves physical targets and uncertainty unchanged.
+D=diag([1000 1000 1000 1 1 1]); W=diag([1e3 1e-2 10]);
+q=nav_observability(W*H/D,W*W.',diag(D),targets/D,1e-10);
+assert(isequal(q.identified,r.identified)); close(q.variance(7:9),r.variance(7:9),1e-12);
+% Tiny but nonzero sensitivity must not be reported with a small uncertainty.
+r=nav_observability(1e-8,1,1,1,1e-10);
+assert(r.identified); close(r.variance,1e16,4);
+r=nav_observability(zeros(2,3),eye(2),ones(3,1),eye(3),1e-10);
+assert(r.rank==0&&~any(r.identified)&&all(isinf(r.variance)));
+fails(@()nav_observability(eye(2),[1 2;2 1],ones(2,1),eye(2),1e-10),'libekf:Covariance');
+% Publication cannot hide missing information behind a consistent watchdog.
+[s,e]=fixture; m=packet(s,'baro_height'); m.lever=zeros(3,1); o=nav_measurement(s,m,e);
+cfg=struct('windows',[1 3 6],'max_gap',1.1,'max_age',1,'capacity',20, ...
+    'instant_limit',5,'mean_limit',[1 1 1],'rms_limit',[2 2 2]);
+history=[];
+for t=s.t-6:s.t
+    [history,check]=nav_watch(history,struct('t',t,'context','height','value',0),t,cfg);
+end
+control=struct('state_time',s.t,'frame_id',s.frame_id,'now',s.t, ...
+    'checks',struct('altitude',{{check}}));
+control.geometry=struct('H',[o.H;o.H],'R',eye(2), ...
+    'scales',ones(21,1),'relative_tolerance',1e-10,'max_variance',[1e-6;1e-6;10]);
+out=nav_geodetic_output(s,eye(21)*1e-12,e,control);
+assert(strcmp(out.quality.altitude,'UNOBSERVABLE')&&~out.observable(3));
+assert(isinf(out.measurement_variance(3))); % A confident prior must not hide absent data.
+control.geometry.H(2,19)=0; control.geometry.R=diag([1 100]);
+out=nav_geodetic_output(s,eye(21),e,control);
+assert(out.observable(3)&&strcmp(out.quality.altitude,'INSUFFICIENT_ACCURACY'));
+control.geometry.max_variance(3)=101;
+out=nav_geodetic_output(s,eye(21),e,control);
+assert(strcmp(out.quality.altitude,'CONSISTENT')&&out.accuracy_sufficient(3));
+assert(strcmp(out.quality.latitude,'UNOBSERVABLE'));
+[~,alarm]=nav_watch([],struct('t',s.t,'context','height','value',6),s.t,cfg);
+control.checks.altitude={alarm}; control.geometry.H(2,:)=o.H;
+out=nav_geodetic_output(s,eye(21),e,control);
+assert(strcmp(out.quality.altitude,'ALARM')&&~out.observable(3));
+
 end

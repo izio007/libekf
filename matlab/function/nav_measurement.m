@@ -206,7 +206,7 @@ switch m.model
         [height,up_e]=nav_height_local(ps,env);
         up=B.'*up_e;
         h=height-m.geoid_offset+s.bh; H=up.'*Jp; H(19)=H(19)+1; units={'m'};
-    case 'static_pressure'
+    case {'static_pressure','impact_pressure','air_pressures'}
         require_fields(m,{'geoid_offset','atmosphere','pressure_valid','calibration_valid'});
         a=m.atmosphere;
         require_fields(a,{'height','pressure','temperature','gradient','gravity','gas_constant', ...
@@ -223,7 +223,8 @@ switch m.model
         altitude=height-m.geoid_offset+s.bh; delta=altitude-a.height;
         temperature=a.temperature+a.gradient*delta;
         assert(altitude>=a.min_height&&altitude<=a.max_height&&temperature>0&& ...
-            isscalar(m.z)&&isreal(m.z)&&isfinite(m.z)&&m.z>0, ...
+            numel(m.z)==1+strcmp(m.model,'air_pressures')&&isreal(m.z)&&all(isfinite(m.z(:)))&& ...
+            (strcmp(m.model,'impact_pressure')||all(m.z(:)>0)), ...
             'libekf:Atmosphere','Pressure or height outside the atmosphere domain.');
         if a.gradient==0
             exponent=-a.gravity*delta/(a.gas_constant*a.temperature);
@@ -233,7 +234,39 @@ switch m.model
         h=a.pressure*exp(exponent);
         assert(isfinite(h)&&h>0,'libekf:Atmosphere','Pressure outside numerical range.');
         H=(env.C_e_l.'*up_e).'*Jp; H(19)=H(19)+1;
+        height_jacobian=H;
         H=-a.gravity*h/(a.gas_constant*temperature)*H; units={'Pa'};
+        if any(strcmp(m.model,{'impact_pressure','air_pressures'}))
+            static_pressure=h; static_jacobian=H;
+            require_fields(m,{'gamma','max_mach','flow_valid'});
+            assert(isscalar(m.gamma)&&isfinite(m.gamma)&&m.gamma>1&& ...
+                isscalar(m.max_mach)&&isfinite(m.max_mach)&&m.max_mach>0&&m.max_mach<1&& ...
+                isequal(m.flow_valid,true),'libekf:Airflow','Invalid subsonic flow model.');
+            omega=zeros(3,1); Omega=zeros(3,1);
+            if norm(lever)>0
+                require_fields(m,{'omega_ib'}); require_fields(env,{'Omega'});
+                omega=vector3(m.omega_ib)-s.bg(:); Omega=vector3(env.Omega);
+            end
+            rot=cross(omega,lever);
+            air=s.v(:)+C*rot-cross(Omega,C*lever)-s.wind(:);
+            Jv=zeros(3,21); Jv(:,4:6)=eye(3); Jv(:,16:18)=-eye(3);
+            Jv(:,7:9)=-C*nav_skew(rot)+nav_skew(Omega)*C*nav_skew(lever);
+            Jv(:,13:15)=C*nav_skew(lever);
+            speed2=air.'*air; mach2=speed2/(m.gamma*a.gas_constant*temperature);
+            assert(isfinite(mach2)&&mach2<=m.max_mach^2, ...
+                'libekf:Airflow','Speed exceeds the declared subsonic domain.');
+            factor=(m.gamma-1)/(2*m.gamma*a.gas_constant);
+            increment=factor*speed2/temperature; power=m.gamma/(m.gamma-1);
+            ratio=expm1(power*log1p(increment));
+            derivative=power*exp((power-1)*log1p(increment));
+            H=ratio*H+h*derivative*factor*(2*air.'*Jv/temperature- ...
+                speed2*a.gradient/temperature^2*height_jacobian);
+            h=h*ratio;
+            if strcmp(m.model,'air_pressures')
+                h=[static_pressure;static_pressure+h];
+                H=[static_jacobian;static_jacobian+H]; units={'Pa';'Pa'};
+            end
+        end
     case 'airdata'
         vb=C.'*(s.v(:)-s.wind(:)); speed=norm(vb); x=vb(1); y=vb(2); z=vb(3);
         r2=x*x+z*z; d=sqrt(r2);

@@ -58,5 +58,29 @@ if nargin>=4
         % Неопределённость долготы на полюсе нельзя снять согласованностью сторожа.
         if strcmp(out.quality.(name),'UNASSESSED'), out.quality.(name)=status; end
     end
+    if isfield(control,'geometry')
+        g=control.geometry;
+        assert(isstruct(g)&&isscalar(g)&&all(isfield(g, ...
+            {'H','R','scales','relative_tolerance','max_variance'}))&& ...
+            numel(g.max_variance)==3&&isreal(g.max_variance)&& ...
+            all(isfinite(g.max_variance(:))&g.max_variance(:)>0), ...
+            'libekf:WatchOutput','Expected observation geometry and explicit output variance limits.');
+        usable=all(isfinite(J),2);
+        geometry=nav_observability(g.H,g.R,g.scales,J(usable,:),g.relative_tolerance);
+        out.observable=false(3,1); out.measurement_variance=Inf(3,1);
+        out.observable(usable)=geometry.identified;
+        out.measurement_variance(usable)=geometry.variance;
+        out.accuracy_sufficient=out.observable&out.measurement_variance<=g.max_variance(:);
+        for k=1:3
+            name=names{k};
+            % Тревога и особенности координат имеют приоритет над геометрией источников.
+            if ~usable(k)||strcmp(out.quality.(name),'ALARM'), continue; end
+            if ~out.observable(k)
+                out.quality.(name)='UNOBSERVABLE';
+            elseif ~out.accuracy_sufficient(k)
+                out.quality.(name)='INSUFFICIENT_ACCURACY';
+            end
+        end
+    end
 end
 end
