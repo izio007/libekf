@@ -4,7 +4,7 @@ base=fileparts(mfilename('fullpath')); addpath(fullfile(base,'function'));
 cases={@requirement_source_models,@requirement_coordinates_and_terrain, ...
     @requirement_numerical_invariance,@requirement_broad_radar,@requirement_common_correction, ...
     @requirement_source_provenance,@requirement_inertial_motion,@requirement_watch_intervals, ...
-    @requirement_terrain_sequence,@requirement_all_source_fusion};
+    @requirement_terrain_sequence,@requirement_all_source_fusion,@requirement_relative_camera_motion,@requirement_joint_correction,@requirement_visual_ambiguity,@requirement_correlated_measurement,@requirement_source_comparison,@requirement_navigation_outage};
 names={'Показания соответствуют физическим моделям источников', ...
     'Смена координат сохраняет результат; неоднозначность рельефа не скрывается', ...
     'Мера расхождения сохраняется при смене единиц и масштаба', ...
@@ -14,7 +14,13 @@ names={'Показания соответствуют физическим мо�
     'Инерциальные данные продолжают движение и накапливают погрешность', ...
     'Три интервала контроля различают тревогу, согласие и нехватку истории', ...
     'Привязка использует последовательность и сохраняет неразличимые варианты', ...
-    'Все модели уточняют общую оценку независимо от осей прибора'};
+    'Все модели уточняют общую оценку независимо от осей прибора', ...
+    'Перемещение камеры учитывает два момента и её размещение на корпусе', ...
+    'Совместная поправка сохраняет неопределённость общего положения', ...
+    'Альтернативное объяснение кадров сохраняет неоднозначность переноса', ...
+    'Зависимость ошибки измерения от оценки учитывается явно', ...
+    'Сравнение источников учитывает общие ошибки и передаёт расхождение сторожу', ...
+    'Общая оценка продолжается без спутников и отклоняет ложную координату'};
 checks=repmat(struct('requirement','','passed',false,'error',''),1,numel(cases));
 for k=1:numel(cases)
     checks(k).requirement=names{k};
@@ -33,7 +39,8 @@ function requirement_all_source_fusion
 models={'gnss_position','external_position','gnss_velocity','external_velocity', ...
     'gnss_position_velocity','external_position_velocity','dme_range','pseudorange', ...
     'range_rate','vor_azimuth','baro_height','airdata','radar_range','ils_angles', ...
-    'gls_deviation','attitude','radar_footprint'};
+    'gls_deviation','attitude','radar_footprint','doppler_velocity', ...
+    'adf_bearing','station_range_azimuth','range_difference','time_difference','rsdn_time_difference','magnetic_vector','optical_landmarks','celestial_pixels','cooperative_range','static_pressure'};
 sensor0=struct('id',s.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
 R=nav_rotation([cos(.4);sin(.4)/sqrt(3)*ones(3,1)]); offset=[10;20;-30];
 sensor1=struct('id','rotated_sensor','origin_ecef',e.origin_ecef+e.C_e_l*offset, ...
@@ -139,6 +146,20 @@ u.accel=zeros(3,1); u.noise_density(1:3,1:3)=4*eye(3);
 [~,Q]=nav_predict(s,zeros(21),u,e);
 close(Q(1:3,1:3),4*dt^3/3*eye(3),1e-12);
 close(Q(1:3,4:6),2*dt^2*eye(3),1e-12); close(Q(4:6,4:6),4*dt*eye(3),1e-12);
+% Two-epoch errors remain correlated: the old position is not exact.
+[~,Q,T,N]=nav_predict(s,eye(21),u,e);
+close(T(1:3,4:6),dt*eye(3),1e-12);
+close(T(20,21),dt,1e-12);
+close(N(1:3,1:3),4*dt^3/3*eye(3),1e-12);
+cross_epoch=T.'; joint=[eye(21) cross_epoch;cross_epoch.' Q];
+% Position increment error cancels common initial position error.
+D=zeros(3,42); D(:,1:3)=-eye(3); D(:,22:24)=eye(3);
+% Initial velocity and accelerometer bias uncertainty also enter the increment.
+expected=(dt^2+dt^4/4+4*dt^3/3)*eye(3);
+close(D*joint*D.',expected,1e-12);
+% Omitting the cross covariance would add two spurious position variances.
+close(D*blkdiag(eye(21),Q)*D.'-expected,2*eye(3),1e-12);
+
 % Неподвижный на Земле прибор видит её вращение и противодействие тяжести.
 s.v=zeros(3,1); e.Omega=[0;0;7.292115e-5]; e.gravity_origin=[0;0;-9.81];
 u.gyro=e.Omega; u.accel=-e.gravity_origin;
@@ -166,6 +187,27 @@ m.t_measure=b.state.t; m.lineage=u.lineage; m.model='external_position';
 end
 function requirement_source_provenance
 [s,e]=fixture;
+
+sensor=struct('id',s.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
+initial=struct('state',s,'P',eye(21),'used',{{}},'capacity',100);
+cases={ ...
+    'optical_landmarks',{'calibration_valid','matches_valid','map_valid','camera_to_body','intrinsics','landmarks','min_depth'}; ...
+    'magnetic_vector',{'field_valid','calibration_valid','field_gradient','field_radius','field_time','field_origin','field_vector'}; ...
+    'rsdn_time_difference',{'geometry_at_epoch','stations','propagation_speed','time_correction','reference_station'}; ...
+    'doppler_velocity',{'beams_body','surface_valid','beam_geometry_valid','surface_velocity'}; ...
+    'adf_bearing',{'bearing_geometry_valid','station','bearing_offset'}; ...
+    'station_range_azimuth',{'basis','station','azimuth_offset'}; ...
+    'time_difference',{'geometry_at_epoch','station','reference_station','range_correction','propagation_speed'}};
+for c=1:size(cases,1)
+    complete=packet(s,cases{c,1}); complete.frame='SENSOR_LOCAL';
+    for j=1:numel(cases{c,2})
+        incomplete=rmfield(complete,cases{c,2}{j});
+        [unchanged,result]=nav_assimilate(initial,incomplete,sensor,e,100);
+        assert(~result.accepted && strcmp(result.reason,'libekf:Packet'));
+        assert(isequal(unchanged,initial),'libekf:TestAtomic','Incomplete input changed accepted state.');
+    end
+end
+
 sensor=struct('id',s.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
 f=struct('state',s,'P',eye(21),'used',{{}},'capacity',10);
 m=packet(s,'gnss_position'); m.frame='SENSOR_LOCAL'; m.lever=zeros(3,1); m.z=s.p+[1;2;3];
@@ -210,7 +252,8 @@ function requirement_source_models
 models={'gnss_position','external_position','gnss_velocity','external_velocity', ...
     'gnss_position_velocity','external_position_velocity','dme_range','pseudorange', ...
     'range_rate','vor_azimuth','baro_height','airdata','radar_range','ils_angles', ...
-    'gls_deviation','attitude','radar_footprint'};
+    'gls_deviation','attitude','radar_footprint','doppler_velocity', ...
+    'adf_bearing','station_range_azimuth','range_difference','time_difference','rsdn_time_difference','magnetic_vector','optical_landmarks','celestial_pixels','cooperative_range','static_pressure'};
 for k=1:numel(models)
     m=packet(s,models{k}); o=nav_measurement(s,m,e);
     assert(all(size(o.H)==[numel(o.residual),21]));
@@ -226,8 +269,77 @@ for k=1:numel(models)
         numeric(:,j)=-(a.residual-b.residual)/(2*steps(j));
     end
     err=max(abs(numeric-o.H),[],'all');
+    if strcmp(models{k},'magnetic_vector')
+        % Tesla-scale derivatives require a physical scale, not a metre-sized tolerance.
+        assert(err<1e-12,'libekf:TestJacobian','Magnetic derivative mismatch.');
+    end
     assert(err<3e-5, 'libekf:TestJacobian','%s Jacobian error %.6g',models{k},err);
 end
+
+% Magnetic vector has an unobservable rotation around a uniform field.
+ms=s; ms.q=[1;0;0;0]; m=packet(ms,'magnetic_vector');
+m.lever=zeros(3,1); m.field_gradient=zeros(3); m.field_vector=[20;0;40]*1e-6;
+o=nav_measurement(ms,m,e); close(o.predicted,[20;0;40]*1e-6,1e-15);
+close(o.H(:,1:3),zeros(3),1e-15);
+close(o.H(:,7:9)*m.field_vector,zeros(3,1),1e-20);
+ms.q=[cos(pi/4);0;0;sin(pi/4)];
+close(nav_measurement(ms,m,e).predicted,[0;-20;40]*1e-6,1e-15);
+m.field_valid=false; fails(@()nav_measurement(ms,m,e),'libekf:Magnetic');
+m.field_valid=true; m.calibration_valid=false;
+fails(@()nav_measurement(ms,m,e),'libekf:Magnetic');
+m.calibration_valid=true; m.field_time=ms.t-1;
+fails(@()nav_measurement(ms,m,e),'libekf:Epoch');
+m.field_time=ms.t; m.field_radius=1; ms.p=ms.p+[2;0;0];
+fails(@()nav_measurement(ms,m,e),'libekf:Magnetic');
+
+% A uniform axial field gives two angular constraints, no position information.
+ms=s; ms.q=[1;0;0;0]; m=packet(ms,'magnetic_vector');
+m.lever=zeros(3,1); m.field_gradient=zeros(3); m.field_vector=[0;0;40e-6];
+m.z=m.field_vector; m.R=eye(3)*1e-12;
+prior=eye(21); prior(7:9,7:9)=eye(3)*.01;
+[candidate,Q,info]=nav_correct(ms,prior,nav_measurement(ms,m,e),100);
+assert(info.accepted); close(candidate.p,ms.p,1e-12);
+close(nav_rotation(candidate.q),eye(3),1e-12);
+expected=prior; variance=1/(1/.01+(40e-6)^2/1e-12);
+expected(7,7)=variance; expected(8,8)=variance;
+close(Q,expected,1e-12);
+% An independently specified linear field changes by G*displacement.
+m.field_gradient=diag([2 -1 -1])*1e-9;
+ms.p=ms.p+[3;4;0];
+close(nav_measurement(ms,m,e).predicted,[6e-9;-4e-9;40e-6],1e-15);
+
+% Independent pinhole geometry and simultaneous scale ambiguity.
+cs=s; cs.q=[1;0;0;0]; cs.p=zeros(3,1); m=packet(cs,'optical_landmarks');
+m.lever=zeros(3,1); m.landmarks=[1 2 10;-2 1 20];
+o=nav_measurement(cs,m,e); close(o.predicted,[400;400;240;280],1e-12);
+m.landmarks=2*m.landmarks;
+close(nav_measurement(cs,m,e).predicted,o.predicted,1e-12);
+m.landmarks=[1 2 -10;-2 1 20];
+fails(@()nav_measurement(cs,m,e),'libekf:Optical');
+m.landmarks=[1 2 10;-2 1 20]; m.matches_valid=false;
+fails(@()nav_measurement(cs,m,e),'libekf:Optical');
+m.matches_valid=true; m.calibration_valid=false;
+fails(@()nav_measurement(cs,m,e),'libekf:Optical');
+m.calibration_valid=true; m.map_valid=false;
+fails(@()nav_measurement(cs,m,e),'libekf:Optical');
+
+% Prepared distant directions constrain attitude, not position directly.
+cs=s; cs.q=[1;0;0;0]; m=packet(cs,'celestial_pixels');
+o=nav_measurement(cs,m,e); close(o.predicted,[400;400;160;320],1e-12);
+close(o.H(:,1:6),zeros(4,6),1e-12);
+cs.p=cs.p+[10000;-2000;500];
+close(nav_measurement(cs,m,e).predicted,o.predicted,1e-12);
+m.geometry_at_epoch=false; fails(@()nav_measurement(cs,m,e),'libekf:Optical');
+m.geometry_at_epoch=true; m.catalog_valid=false;
+fails(@()nav_measurement(cs,m,e),'libekf:Optical');
+
+% Peer position is uncertain, not a perfect beacon.
+cs=s; m=packet(cs,'cooperative_range'); m.lever=zeros(3,1); m.station=cs.p+[3;4;0];
+m.peer_covariance=diag([4 9 1]); m.peer_cross_cov(1,1)=.5; m.noise_model='joint_required';
+o=nav_measurement(cs,m,e); close(o.predicted,5,1e-12); close(o.R,8.2,1e-12);
+close(o.state_noise_cov(1),.3,1e-12);
+m.peer_valid=false; fails(@()nav_measurement(cs,m,e),'libekf:Peer');
+m.peer_valid=true; m.peer_time=cs.t-1; fails(@()nav_measurement(cs,m,e),'libekf:Peer');
 
 % Exact geometric cases do not use the prediction as their expected value.
 s.q=[1;0;0;0]; s.p=[1000;400;300];
@@ -252,6 +364,61 @@ m=packet(s,'baro_height'); m.lever=zeros(3,1); m.geoid_offset=3;
 close(nav_measurement(s,m,e).predicted,1005,1e-8);
 m=packet(s,'radar_range'); m.lever=zeros(3,1); m.beam_body=[-1;0;0];
 close(nav_measurement(s,m,e).predicted,1000,1e-10);
+
+% Разные радиосредства сохраняют физический смысл угла и разности дальностей.
+s.q=[1;0;0;0];
+m=packet(s,'adf_bearing'); m.lever=zeros(3,1); m.station=s.p+[3;4;12];
+close(nav_measurement(s,m,e).predicted,atan2(4,3),1e-12);
+s.q=[cos(pi/4);0;0;sin(pi/4)];
+close(nav_measurement(s,m,e).predicted,atan2(-3,4),1e-12);
+s.q=[1;0;0;0];
+m=packet(s,'station_range_azimuth'); m.lever=zeros(3,1);
+m.station=s.p-[0;3;4]; m.azimuth_offset=0;
+close(nav_measurement(s,m,e).predicted,[5;atan2(3,4)],1e-12);
+m=packet(s,'range_difference'); m.lever=zeros(3,1);
+m.station=s.p+[3;4;0]; m.reference_station=s.p+[5;12;0];
+o=nav_measurement(s,m,e); close(o.predicted,-6,1e-12); assert(o.H(20)==0);
+s.clock=s.clock+100; close(nav_measurement(s,m,e).predicted,-6,1e-12);
+m.model='time_difference'; m.units={'s'}; m.R=1/m.propagation_speed^2;
+close(nav_measurement(s,m,e).predicted,-6/299792458,1e-18);
+m.geometry_at_epoch=false; fails(@()nav_measurement(s,m,e),'libekf:GeometryEpoch');
+
+% РСДН: пары с общей опорной станцией обрабатываются совместно.
+m=packet(s,'rsdn_time_difference'); m.lever=zeros(3,1);
+m.stations=s.p.'+[3 4 0;6 8 0]; m.reference_station=s.p+[5;12;0];
+o=nav_measurement(s,m,e);
+close(o.predicted,[-6;-2]/299792458,1e-18);
+assert(o.R(1,2)>0 && all(o.H(:,20)==0));
+
+% Static pressure remains in pascals and uses the declared atmosphere, not a hidden standard day.
+[ps,pe]=fixture; ps.q=[1;0;0;0]; ps.bh=0; ps.p=zeros(3,1);
+pm=packet(ps,'static_pressure'); pm.lever=zeros(3,1); pm.geoid_offset=0;
+pm.atmosphere.gradient=0;
+close(nav_measurement(ps,pm,pe).predicted,100000,1e-7);
+ps.p=[9000*log(2);0;0];
+po=nav_measurement(ps,pm,pe); close(po.predicted,50000,1e-7);
+close(po.H(1),-50000/9000,1e-9); close(po.H(19),po.H(1),1e-12);
+ps.p=[1000;0;0]; pm.atmosphere.gradient=-.006;
+close(nav_measurement(ps,pm,pe).predicted,100000*.98^(50/9),1e-7);
+pm.atmosphere.gradient=1e-12;
+close(nav_measurement(ps,pm,pe).predicted,100000*exp(-1/9),1e-6);
+pm.pressure_valid=false; fails(@()nav_measurement(ps,pm,pe),'libekf:Atmosphere');
+pm.pressure_valid=true; pm.atmosphere.time_end=ps.t-1;
+fails(@()nav_measurement(ps,pm,pe),'libekf:Atmosphere');
+pm.atmosphere.time_end=ps.t; pm.atmosphere.max_height=999;
+fails(@()nav_measurement(ps,pm,pe),'libekf:Atmosphere');
+
+% Доплеровские проекции относятся к поверхности, а не к воздушному потоку.
+s.q=[1;0;0;0]; s.v=[3;4;5];
+m=packet(s,'doppler_velocity'); m.lever=zeros(3,1);
+close(nav_measurement(s,m,e).predicted,[-3;-1;-7]/sqrt(2),1e-12);
+s.wind=[100;200;300];
+close(nav_measurement(s,m,e).predicted,[-3;-1;-7]/sqrt(2),1e-12);
+s.q=[cos(pi/4);0;0;sin(pi/4)];
+close(nav_measurement(s,m,e).predicted,[-1;-7;-9]/sqrt(2),1e-12);
+bad=m; bad.surface_valid=false;
+fails(@()nav_measurement(s,bad,e),'libekf:Doppler');
+s.v=[3;4;0]; s.wind=zeros(3,1);
 
 % Known 90-degree body-to-ECEF rotation and antenna kinematics.
 s.q=[cos(pi/4);0;0;sin(pi/4)]; s.bg=zeros(3,1); e.Omega=zeros(3,1);
@@ -308,16 +475,62 @@ switch model
         m.z=s.v; m.units=repmat({'m/s'},3,1);
     case {'gnss_position_velocity','external_position_velocity'}
         m.z=[s.p;s.v]; m.R=eye(6); m.units=[repmat({'m'},3,1);repmat({'m/s'},3,1)];
+    case 'cooperative_range'
+        m.station=s.p+[300;400;200]; m.peer_covariance=eye(3)*.04;
+        m.peer_cross_cov=zeros(21,3); m.peer_cross_frame_id=s.frame_id;
+        m.peer_time=s.t; m.peer_valid=true; m.z=500; m.R=1; m.units={'m'};
     case {'dme_range','pseudorange','range_rate'}
         m.station=s.p+[300;400;200]; m.station_velocity=[10;20;30];
         m.z=500; m.R=1; m.units={'m'}; m.geometry_at_epoch=true;
         m.range_correction=2; m.rate_correction=.2;
         if strcmp(model,'range_rate'), m.units={'m/s'}; end
+    case {'range_difference','time_difference'}
+        m.station=s.p+[300;400;200]; m.reference_station=s.p+[-500;100;300];
+        m.range_correction=2; m.geometry_at_epoch=true; m.propagation_speed=299792458;
+        m.z=0; m.R=1; m.units={'m'};
+        if strcmp(model,'time_difference'), m.units={'s'}; m.R=1/m.propagation_speed^2; end
+    case 'rsdn_time_difference'
+        m.stations=s.p.'+[300 400 200;-400 100 200];
+        m.reference_station=s.p+[-500;100;300]; m.propagation_speed=299792458;
+        m.time_correction=[2;1]/m.propagation_speed; m.geometry_at_epoch=true;
+        m.z=[0;0]; m.R=[1 .5;.5 1]/m.propagation_speed^2; m.units={'s';'s'};
+    case 'celestial_pixels'
+        m.camera_to_body=eye(3); m.intrinsics=[800;800;320;240];
+        directions=[.1 -.2;.2 .1;1 1]; directions=directions./vecnorm(directions);
+        m.directions=(nav_rotation(s.q)*directions).'; m.min_forward=.1;
+        m.calibration_valid=true; m.matches_valid=true; m.catalog_valid=true; m.geometry_at_epoch=true;
+        m.z=[400;400;160;320]; m.R=eye(4); m.units=repmat({'pixel'},4,1);
+    case 'optical_landmarks'
+        m.camera_to_body=eye(3); m.intrinsics=[800;800;320;240];
+        m.landmarks=(s.p+nav_rotation(s.q)*(m.lever+[1 -2;2 1;100 120])).';
+        m.min_depth=.1; m.calibration_valid=true; m.matches_valid=true; m.map_valid=true;
+        m.z=[328;256;320-40/3;240+20/3]; m.R=eye(4); m.units=repmat({'pixel'},4,1);
+    case 'magnetic_vector'
+        m.field_vector=[20;5;40]*1e-6; m.field_origin=s.p;
+        m.field_gradient=diag([1 -2 1])*1e-10; m.field_radius=10000;
+        m.field_time=s.t; m.field_valid=true; m.calibration_valid=true;
+        m.z=[20;5;40]*1e-6; m.R=eye(3)*1e-12; m.units=repmat({'T'},3,1);
+    case 'adf_bearing'
+        m.station=s.p+[300;400;200]; m.bearing_offset=0; m.bearing_geometry_valid=true;
+        m.z=0; m.R=.01; m.units={'rad'};
+    case 'station_range_azimuth'
+        m.station=s.p-[500;400;100]; m.basis=[0 0 1;1 0 0;0 1 0];
+        m.azimuth_offset=.1; m.z=[600;0]; m.R=diag([1 .01]); m.units={'m';'rad'};
     case 'vor_azimuth'
         m.station=s.p-[500;400;100]; m.basis=[0 0 1;1 0 0;0 1 0];
         m.azimuth_offset=.1; m.z=0; m.R=.01; m.units={'rad'};
+    case 'static_pressure'
+        m.geoid_offset=20; m.z=100000; m.R=400; m.units={'Pa'};
+        m.pressure_valid=true; m.calibration_valid=true;
+        m.atmosphere=struct('height',0,'pressure',100000,'temperature',300,'gradient',-.006, ...
+            'gravity',10,'gas_constant',300,'min_height',-1000,'max_height',10000, ...
+            'time_start',s.t-10,'time_end',s.t+10,'valid',true);
     case 'baro_height'
         m.geoid_offset=20; m.z=1000; m.R=4; m.units={'m'};
+    case 'doppler_velocity'
+        m.beams_body=[1 0 -1;0 1 -1;-1 0 -1]/sqrt(2);
+        m.surface_velocity=[1;0;0]; m.surface_valid=true; m.beam_geometry_valid=true;
+        m.z=[-3;-1;-7]/sqrt(2); m.R=eye(3); m.units=repmat({'m/s'},3,1);
     case 'airdata'
         m.z=[100;0;0]; m.R=diag([1 .001 .001]); m.units={'m/s';'rad';'rad'};
     case {'radar_range','radar_footprint'}
@@ -378,6 +591,34 @@ s.p=[0;0;env.ellipsoid_a*sqrt(1-env.ellipsoid_e2)+100]-env.origin_ecef;
 output=nav_geodetic_output(s,eye(21),env);
 assert(output.lat==90 && isnan(output.lon) && abs(output.alt-100)<1e-7);
 assert(strcmp(output.quality.longitude,'UNDEFINED'));
+
+% Output checks apply only to the quantities they actually monitor.
+pole=s; s.p=[1000;0;0];
+c=struct('windows',[1 3 6],'max_gap',1.1,'max_age',1,'capacity',20, ...
+    'instant_limit',5,'mean_limit',[1 1 1],'rms_limit',[2 2 2]);
+h=[];
+for t=s.t-6:s.t
+    [h,good]=nav_watch(h,struct('t',t,'context','height_check','value',0),t,c);
+end
+control=struct('state_time',s.t,'frame_id',s.frame_id,'now',s.t, ...
+    'checks',struct('altitude',{{good}}));
+out=nav_geodetic_output(s,eye(21),env,control);
+assert(strcmp(out.quality.altitude,'CONSISTENT')&&strcmp(out.quality.latitude,'NOT_READY'));
+[~,bad]=nav_watch([],struct('t',s.t,'context','other_height_check','value',6),s.t,c);
+control.checks.altitude={good,bad};
+out=nav_geodetic_output(s,eye(21),env,control); assert(strcmp(out.quality.altitude,'ALARM'));
+[~,unready]=nav_watch([],[],s.t,c); control.checks.altitude={good,unready};
+out=nav_geodetic_output(s,eye(21),env,control); assert(strcmp(out.quality.altitude,'NOT_READY'));
+control.now=s.t+2;
+fails(@()nav_geodetic_output(s,eye(21),env,control),'libekf:WatchOutput');
+[~,stale]=nav_watch(h,[],control.now,c); control.checks.altitude={stale};
+out=nav_geodetic_output(s,eye(21),env,control); assert(strcmp(out.quality.altitude,'NOT_READY'));
+control.state_time=s.t-1;
+fails(@()nav_geodetic_output(s,eye(21),env,control),'libekf:WatchOutput');
+control.state_time=s.t; control.now=s.t; control.checks.longitude={good};
+control.checks.altitude={good};
+out=nav_geodetic_output(pole,eye(21),env,control); assert(strcmp(out.quality.longitude,'UNDEFINED'));
+
 
 % Ravine: two slopes, ten metres below the ridge at the centre.
 vertices=[0 -10 -10;-10 0 -10;-10 0 10;0 -10 10;0 10 -10;0 10 10];
@@ -468,3 +709,373 @@ closer=nav_terrain_footprint(o,b,pi/3,v,f,.01);
 assert(closer.range<hit.range && closer.point(2)>0);
 end
 
+
+function requirement_correlated_measurement
+[s,~]=fixture; P=eye(21); H=zeros(1,21); H(1)=1;
+o=struct('frame_id',s.frame_id,'t_measure',s.t,'noise_model','joint_required', ...
+    'H',H,'R',1,'residual',2,'state_noise_cov',zeros(21,1));
+o.state_noise_cov(1)=.5;
+[x,Q,info]=nav_correct(s,P,o,100); assert(info.accepted);
+close(x.p,s.p+[1;0;0],1e-12); close(Q(1,1),.25,1e-12); close(info.S,3,1e-12);
+o.state_noise_cov(1)=-.5;
+[x,Q,info]=nav_correct(s,P,o,100);
+close(x.p,s.p+[1;0;0],1e-12); close(Q(1,1),.75,1e-12); close(info.S,1,1e-12);
+o.state_noise_cov(1)=2;
+fails(@()nav_correct(s,P,o,100),'libekf:Correlation');
+o.state_noise_cov(1)=.5; o.noise_model='independent';
+fails(@()nav_correct(s,P,o,100),'libekf:Correlation');
+
+% Impossible peer dependence must be rejected even perpendicular to the measured range.
+[s,e]=fixture; m=packet(s,'cooperative_range'); m.lever=zeros(3,1);
+m.station=s.p+[10;0;0]; m.z=10; m.peer_covariance=eye(3);
+m.peer_cross_cov=zeros(21,3); m.peer_cross_cov(2,2)=2;
+m.noise_model='joint_required';
+o=nav_measurement(s,m,e);
+fails(@()nav_correct(s,eye(21),o,100),'libekf:Correlation');
+m.peer_cross_cov(2,2)=.5; o=nav_measurement(s,m,e);
+[~,~,info]=nav_correct(s,eye(21),o,100); assert(info.accepted);
+m.peer_covariance=zeros(3); m.peer_cross_cov=zeros(21,3);
+o=nav_measurement(s,m,e); [~,~,info]=nav_correct(s,eye(21),o,100); assert(info.accepted);
+m.peer_cross_cov(2,2)=1e-20; o=nav_measurement(s,m,e);
+fails(@()nav_correct(s,eye(21),o,100),'libekf:Correlation');
+
+% The same dependent measurement in rotated sensor axes gives the same correction.
+[s,e]=fixture; sensor=struct('id',s.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
+f=struct('state',s,'P',eye(21),'used',{{}},'capacity',10);
+m=packet(s,'external_position'); m.lever=zeros(3,1); m.frame='SENSOR_LOCAL';
+m.z=s.p+[2;0;0]; m.noise_model='joint_required';
+m.state_noise_frame_id=s.frame_id; m.state_noise_cov=zeros(21,3); m.state_noise_cov(1,1)=.5;
+[normal,info]=nav_assimilate(f,m,sensor,e,100); assert(info.accepted);
+close(normal.state.p,s.p+[1;0;0],1e-12); close(normal.P(1,1),.25,1e-12);
+turn=nav_rotation([cos(.3);0;0;sin(.3)]);
+adapter=struct('C_e_l',turn,'origin_ecef',[10;20;30],'frame_id','alternate');
+native=m; native.frame='ECEF'; native=nav_packet_from_ecef(native,adapter); native.frame='SENSOR_LOCAL';
+other=struct('id','alternate','origin_ecef',e.origin_ecef+[10;20;30],'C_e_s',turn);
+[rotated,info]=nav_assimilate(f,native,other,e,100); assert(info.accepted);
+close(rotated.state.p,normal.state.p,1e-11); close(rotated.P,normal.P,1e-11);
+native.state_noise_frame_id='wrong_common_axes';
+[same,info]=nav_assimilate(f,native,other,e,100); assert(~info.accepted&&isequal(same,f));
+
+% Full visual pose with known dependence on the two-epoch prior.
+a=s; a.p=zeros(3,1); a.q=[1;0;0;0]; b=a; b.p=[1;0;0]; b.t=a.t+1;
+f=struct('state',b,'reference',a,'P',eye(21)*.01,'jointP',eye(42)*.01, ...
+    'used',{{}},'capacity',10);
+m=struct('model','visual_odometry','mode','pose','source','camera', ...
+    'lineage',{{'image1','image2'}},'quality','VALID','noise_model','joint_required', ...
+    'correlation_group','camera','frame_id',a.frame_id,'t_start',a.t,'t_end',b.t, ...
+    't_received',b.t,'units',{{'m';'m';'m';'rad';'rad';'rad'}}, ...
+    'z',[2;0;0;1;0;0;0],'R',eye(6)*.01,'camera_to_body',eye(3),'lever',zeros(3,1), ...
+    'scale_valid',true,'calibration_valid',true,'max_angle',.5, ...
+    'state_noise_frame_id',a.frame_id,'state_noise_cov',zeros(42,6));
+m.state_noise_cov(22,1)=.002;
+[updated,info]=nav_assimilate(f,m,[],[],100); assert(info.accepted);
+close(updated.reference.p(1),-.01/.034,1e-12);
+close(updated.state.p(1),1+.012/.034,1e-12);
+m.state_noise_cov=zeros(21,6);
+[same,info]=nav_assimilate(f,m,[],[],100); assert(~info.accepted&&isequal(same,f));
+
+
+end
+
+function requirement_joint_correction
+[a,~]=fixture; a.p=zeros(3,1); a.q=[1;0;0;0]; b=a; b.t=a.t+1; b.p=[1;0;0];
+m=struct('source','camera','lineage',{{'first','second'}},'quality','VALID', ...
+    'noise_model','independent','correlation_group','camera','frame_id',a.frame_id, ...
+    't_start',a.t,'t_end',b.t,'t_received',b.t,'units',{{'m';'m';'m'}}, ...
+    'z',[3;0;0],'R',eye(3),'camera_to_body',eye(3),'lever',zeros(3,1), ...
+    'scale_valid',true,'calibration_valid',true);
+P=[eye(21) .5*eye(21);.5*eye(21) eye(21)];
+o=nav_odometry_measurement(a,b,m);
+[x,Q,info]=nav_correct({a,b},P,o,100); assert(info.accepted);
+close(x{1}.p,[-.5;0;0],1e-12); close(x{2}.p,[1.5;0;0],1e-12);
+close(Q([1 22],[1 22]),[.875 .625;.625 .875],1e-12);
+close([.5 .5]*Q([1 22],[1 22])*[.5;.5],.75,1e-12);
+
+% Changing Earth-fixed local axes must preserve the complete two-epoch correction.
+[~,from]=fixture; to=from; to.frame_id='pair_rotated';
+to.C_e_l=nav_rotation([.9;.1;.2;.3]/norm([.9;.1;.2;.3]));
+to.origin_ecef=from.origin_ecef+[10;20;30];
+[native,Pnative]=nav_change_frame({a,b},P,from,to);
+shifted=m; shifted.frame_id=to.frame_id;
+onative=nav_odometry_measurement(native{1},native{2},shifted);
+close(onative.residual,o.residual,1e-12);
+[xn,Qn,info]=nav_correct(native,Pnative,onative,100); assert(info.accepted);
+[back,Qback]=nav_change_frame(xn,Qn,to,from);
+for j=1:2
+    close(back{j}.p,x{j}.p,1e-11);
+    close(nav_rotation(back{j}.q),nav_rotation(x{j}.q),1e-12);
+end
+close(Qback,Q,1e-11);
+
+[x,Q,info]=nav_correct({a,b},P,o,.01);
+assert(~info.accepted&&isequal(x,{a,b})&&isequal(Q,P));
+% Perfectly shared errors are legal; the relative observation adds no absolute information.
+b.p=a.p; P=[eye(21) eye(21);eye(21) eye(21)]; m.z=zeros(3,1);
+o=nav_odometry_measurement(a,b,m); [x,Q,info]=nav_correct({a,b},P,o,100);
+assert(info.accepted); close(Q,P,1e-12); close(x{1}.p,a.p,1e-12);
+P(1,22)=2; P(22,1)=2;
+fails(@()nav_correct({a,b},P,o,100),'libekf:Covariance');
+
+% A delayed observation constrains its own epoch, then the correlated current state.
+[a,e]=fixture; a.p=zeros(3,1); b=a; b.p=[10;0;0]; b.t=a.t+1;
+f=struct('state',b,'P',eye(21),'reference',a, ...
+    'jointP',[eye(21) .5*eye(21);.5*eye(21) eye(21)],'used',{{}},'capacity',10);
+sensor=struct('id',a.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
+g=packet(a,'gnss_position'); g.frame='SENSOR_LOCAL'; g.lever=zeros(3,1);
+g.z=[2;0;0]; g.t_received=b.t+.1;
+% Age is measured from observation, not from delivery; late data keep their own epoch.
+policy=struct('now',g.t_received,'max_age',g.t_received-g.t_measure);
+[timed,info]=nav_assimilate(f,g,sensor,e,100,policy); assert(info.accepted);
+policy.max_age=policy.max_age-.01;
+[same,info]=nav_assimilate(f,g,sensor,e,100,policy);
+assert(~info.accepted&&strcmp(info.reason,'libekf:Stale')&&isequal(same,f));
+policy.max_age=10; policy.now=g.t_received-.01;
+[same,info]=nav_assimilate(f,g,sensor,e,100,policy);
+assert(~info.accepted&&strcmp(info.reason,'libekf:Time')&&isequal(same,f));
+policy.now=g.t_received+20;
+[same,info]=nav_assimilate(f,g,sensor,e,100,policy);
+assert(~info.accepted&&strcmp(info.reason,'libekf:Stale')&&isequal(same,f));
+[updated,info]=nav_assimilate(f,g,sensor,e,100); assert(info.accepted);
+close(timed.P,updated.P,1e-12);
+close(updated.reference.p,[1;0;0],1e-12); close(updated.state.p,[10.5;0;0],1e-12);
+close(updated.jointP([1 22],[1 22]),[.5 .25;.25 .875],1e-12);
+assert(updated.reference.t==a.t&&updated.state.t==b.t);
+[same,info]=nav_assimilate(updated,g,sensor,e,100); assert(~info.accepted&&isequal(same,updated));
+g.t_measure=a.t+.5; g.lineage={'unretained_epoch'};
+[same,info]=nav_assimilate(updated,g,sensor,e,100); assert(~info.accepted&&isequal(same,updated));
+
+% Complete shared path: save reference -> inertial interval -> GNSS -> camera pair.
+[a,e]=fixture; a.p=zeros(3,1); a.q=[1;0;0;0]; a.v=[1;0;0];
+a.ba=zeros(3,1); a.bg=zeros(3,1);
+e.Omega=zeros(3,1); e.gravity_origin=zeros(3,1); e.gravity_gradient=zeros(3);
+e.gravity_radius=1e5; e.max_step=.1; e.state_noise_density=eye(21)*1e-8;
+f=struct('state',a,'P',eye(21),'reference',a,'jointP',[eye(21) eye(21);eye(21) eye(21)], ...
+    'used',{{}},'capacity',100);
+u=struct('model','inertial','source','imu','lineage',{{'pair_imu'}},'quality','VALID', ...
+    'frame','BODY','accel_unit','m/s^2','gyro_unit','rad/s','t_start',a.t, ...
+    't_end',a.t+.1,'t_received',a.t+.1,'accel',zeros(3,1),'gyro',zeros(3,1), ...
+    'noise_density',eye(6)*1e-6);
+policy=struct('now',u.t_received+1,'max_age',.5);
+[same,info]=nav_assimilate(f,u,[],e,100,policy);
+assert(~info.accepted&&strcmp(info.reason,'libekf:Stale')&&isequal(same,f));
+[f,info]=nav_assimilate(f,u,[],e,100); assert(info.accepted);
+sensor=struct('id',a.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
+g=packet(f.state,'gnss_position'); g.frame='SENSOR_LOCAL'; g.lever=zeros(3,1);
+g.z=f.state.p+[.1;0;0];
+[f,info]=nav_assimilate(f,g,sensor,e,100); assert(info.accepted);
+assert(f.reference.p(1)>0); close(f.P,f.jointP(22:42,22:42),1e-12);
+m.model='visual_odometry'; m.t_start=a.t; m.t_end=f.state.t; m.t_received=f.state.t;
+m.z=[.12;0;0]; m.R=eye(3)*.001;
+policy=struct('now',m.t_received+1,'max_age',.5);
+[same,info]=nav_assimilate(f,m,[],e,100,policy);
+assert(~info.accepted&&strcmp(info.reason,'libekf:Stale')&&isequal(same,f));
+before=f; [f,info]=nav_assimilate(f,m,[],e,100); assert(info.accepted);
+assert(norm(f.state.p-before.state.p)>0); close(f.P,f.jointP(22:42,22:42),1e-12);
+[unchanged,info]=nav_assimilate(f,m,[],e,100); assert(~info.accepted&&isequal(unchanged,f));
+m.lineage={'new_frame_a','new_frame_b'}; m.z=[1000;0;0];
+[unchanged,info]=nav_assimilate(f,m,[],e,.01); assert(~info.accepted&&isequal(unchanged,f));
+
+% Replacing the saved epoch must not create information or erase provenance.
+saved=nav_save_reference(f); assert(isequal(saved.state,f.state)&&isequal(saved.P,f.P));
+assert(isequal(saved.used,f.used)&&isequal(saved.reference,saved.state));
+close(saved.jointP,[f.P f.P;f.P f.P],1e-12);
+u.t_start=saved.state.t; u.t_end=u.t_start+.1; u.t_received=u.t_end;
+u.lineage={'second_pair_imu'};
+[advanced,info]=nav_assimilate(saved,u,[],e,100); assert(info.accepted);
+m.t_start=saved.reference.t; m.t_end=advanced.state.t; m.t_received=advanced.state.t;
+m.lineage={'new_reference_frame','new_current_frame'};
+m.z=advanced.state.p-advanced.reference.p;
+[accepted,info]=nav_assimilate(advanced,m,[],e,100); assert(info.accepted);
+assert(accepted.reference.t==saved.state.t&&accepted.state.t==u.t_end);
+m.lineage={'first','second'};
+[unchanged,info]=nav_assimilate(accepted,m,[],e,100);
+assert(~info.accepted&&isequal(unchanged,accepted));
+
+
+end
+
+function requirement_relative_camera_motion
+[a,~]=fixture; a.p=zeros(3,1); a.q=[1;0;0;0]; b=a; b.t=a.t+1; b.p=[3;4;0];
+m=struct('source','camera','lineage',{{'frame100','frame101'}},'quality','VALID', ...
+    'noise_model','independent','correlation_group','camera','frame_id',a.frame_id, ...
+    't_start',a.t,'t_end',b.t,'t_received',b.t+.1,'units',{{'m';'m';'m'}}, ...
+    'z',[3;4;0],'R',eye(3),'camera_to_body',eye(3),'lever',[1;0;0], ...
+    'scale_valid',true,'calibration_valid',true);
+o=nav_odometry_measurement(a,b,m); close(o.predicted,[3;4;0],1e-12);
+b.p=zeros(3,1); b.q=[cos(pi/4);0;0;sin(pi/4)];
+close(nav_odometry_measurement(a,b,m).predicted,[-1;1;0],1e-12);
+o=nav_odometry_measurement(a,b,m); numeric=zeros(3,42);
+for j=1:42
+    d=zeros(21,1); index=mod(j-1,21)+1; d(index)=1e-6;
+    if j<=21
+        plus=nav_odometry_measurement(nav_apply_error(a,d),b,m);
+        minus=nav_odometry_measurement(nav_apply_error(a,-d),b,m);
+    else
+        plus=nav_odometry_measurement(a,nav_apply_error(b,d),m);
+        minus=nav_odometry_measurement(a,nav_apply_error(b,-d),m);
+    end
+    numeric(:,j)=-(plus.residual-minus.residual)/(2e-6);
+end
+close(numeric,o.H,1e-8);
+a.p=a.p+[100;200;300]; b.p=b.p+[100;200;300];
+close(nav_odometry_measurement(a,b,m).predicted,o.predicted,1e-12);
+m.scale_valid=false; fails(@()nav_odometry_measurement(a,b,m),'libekf:Quality');
+m.scale_valid=true; m.t_start=a.t-1;
+fails(@()nav_odometry_measurement(a,b,m),'libekf:Epoch');
+
+% A monocular direction is invariant under positive scaling, not under reversal.
+a.p=zeros(3,1); b.p=[3;4;0]; a.q=[1;0;0;0]; b.q=a.q;
+m.t_start=a.t; m.mode='direction'; m.scale_valid=false; m.lever=zeros(3,1);
+m.z=[.6;.8;0]; m.tangent_basis=[-.8 0;.6 0;0 1]; m.R=eye(2)*.01;
+m.units={'1';'1'}; m.min_displacement=.01; m.max_angle=.3;
+o=nav_odometry_measurement(a,b,m); close(o.residual,zeros(2,1),1e-12);
+close(o.H(:,22:24)*[3;4;0],zeros(2,1),1e-12);
+b.p=2*b.p; close(nav_odometry_measurement(a,b,m).residual,o.residual,1e-12);
+b.p=[3;4;.2]; o=nav_odometry_measurement(a,b,m);
+for j=1:3
+    plus=b; minus=b; plus.p(j)=plus.p(j)+1e-6; minus.p(j)=minus.p(j)-1e-6;
+    op=nav_odometry_measurement(a,plus,m); om=nav_odometry_measurement(a,minus,m);
+    close(-(op.residual-om.residual)/2e-6,o.H(:,21+j),1e-8);
+end
+b.p=[-3;-4;0]; fails(@()nav_odometry_measurement(a,b,m),'libekf:Geometry');
+b.p=zeros(3,1); fails(@()nav_odometry_measurement(a,b,m),'libekf:Geometry');
+
+% Relative rotation remains measurable when camera centres do not translate.
+m.mode='rotation'; m.units={'rad';'rad';'rad'}; m.R=eye(3)*.001; m.max_angle=.5;
+b.q=[cos(.1);0;0;sin(.1)]; m.z=[cos(.15);0;0;sin(.15)];
+o=nav_odometry_measurement(a,b,m); close(o.residual,[0;0;.1],1e-12);
+close(o.H(:,1:6),zeros(3,6),1e-12);
+for which=1:2
+    for j=7:9
+        d=zeros(21,1); d(j)=1e-6;
+        if which==1
+            op=nav_odometry_measurement(nav_apply_error(a,d),b,m);
+            om=nav_odometry_measurement(nav_apply_error(a,-d),b,m);
+        else
+            op=nav_odometry_measurement(a,nav_apply_error(b,d),m);
+            om=nav_odometry_measurement(a,nav_apply_error(b,-d),m);
+        end
+        close(-(op.residual-om.residual)/2e-6,o.H(:,(which-1)*21+j),1e-8);
+    end
+end
+m.z=-m.z; close(nav_odometry_measurement(a,b,m).residual,o.residual,1e-12);
+f=struct('state',b,'reference',a,'P',eye(21)*.01,'jointP',eye(42)*.01, ...
+    'used',{{}},'capacity',10); m.model='visual_odometry';
+[updated,result]=nav_assimilate(f,m,[],[],100); assert(result.accepted);
+after=nav_odometry_measurement(updated.reference,updated.state,m);
+assert(norm(after.residual)<norm(o.residual));
+m.max_angle=.01; fails(@()nav_odometry_measurement(a,b,m),'libekf:Geometry');
+
+% One camera pair carries translation and rotation with their full covariance.
+m.max_angle=.5; m.mode='pose'; m.scale_valid=true; b.p=[1;0;0];
+m.z=[1.1;0;0;cos(.15);0;0;sin(.15)];
+m.units={'m';'m';'m';'rad';'rad';'rad'};
+m.R=eye(6)*.01; m.R(1,6)=.002; m.R(6,1)=.002;
+o=nav_odometry_measurement(a,b,m); close(o.residual,[.1;0;0;0;0;.1],1e-12);
+close(o.R(1,6),.002,1e-12); assert(size(o.H,1)==6);
+f.state=b; f.reference=a;
+[updated,result]=nav_assimilate(f,m,[],[],100); assert(result.accepted);
+assert(numel(updated.used)==2);
+[same,result]=nav_assimilate(updated,m,[],[],100); assert(~result.accepted&&isequal(same,updated));
+m.mode='direction_rotation'; m.scale_valid=false; m.z(1:3)=[1;0;0];
+m.tangent_basis=[0 0;1 0;0 1]; m.units={'1';'1';'rad';'rad';'rad'};
+m.R=eye(5)*.01; m.R(1,5)=.002; m.R(5,1)=.002;
+o=nav_odometry_measurement(a,b,m); assert(size(o.H,1)==5);
+close(o.R(1,5),.002,1e-12);
+m.R(1,5)=1; m.R(5,1)=1;
+fails(@()nav_odometry_measurement(a,b,m),'libekf:Covariance');
+
+
+
+end
+
+function requirement_visual_ambiguity
+K=[800 0 320;0 800 240;0 0 1];
+[x,y]=meshgrid(linspace(-2,2,6),linspace(-1.5,1.5,5));
+world=[x(:).';y(:).';10+2*sin((1:numel(x))*.7)];
+training=mod((1:numel(x)).',2)==1; limits=struct('rotation_rms',1e-6,'plane_rms',1e-6);
+rotation=nav_rotation([cos(.05);0;sin(.05);0]);
+first=K*world; first=(first(1:2,:)./first(3,:)).';
+second=K*rotation.'*world; second=(second(1:2,:)./second(3,:)).';
+d=nav_visual_ambiguity(first,second,K,training,limits);
+assert(d.geometry_ready&&strcmp(d.status,'AMBIGUOUS')&&d.rotation_explains&&d.plane_explains);
+world(3,:)=10; first=K*world; first=(first(1:2,:)./first(3,:)).';
+second=K*rotation.'*(world-[1;0;0]); second=(second(1:2,:)./second(3,:)).';
+d=nav_visual_ambiguity(first,second,K,training,limits);
+assert(d.geometry_ready&&strcmp(d.status,'AMBIGUOUS')&&d.plane_explains);
+world(3,:)=10+2*sin((1:numel(x))*.7); first=K*world; first=(first(1:2,:)./first(3,:)).';
+second=K*rotation.'*(world-[1;0;0]); second=(second(1:2,:)./second(3,:)).';
+d=nav_visual_ambiguity(first,second,K,training,limits);
+assert(d.geometry_ready&&~d.rotation_explains&&~d.plane_explains&&strcmp(d.status,'UNASSESSED'));
+first(:)=100; second(:)=110; d=nav_visual_ambiguity(first,second,K,training,limits);
+assert(~d.geometry_ready&&strcmp(d.status,'UNASSESSED'));
+fails(@()nav_visual_ambiguity(first,second,K,true(size(training)),limits),'libekf:Vision');
+end
+
+function requirement_source_comparison
+a=struct('value',[2;0;0],'covariance',eye(3),'quantity','position','units',{{'m';'m';'m'}}, ...
+    'frame_id','local','t',10,'quality','VALID','source','one');
+b=a; b.value=zeros(3,1); b.source='two';
+cfg=struct('max_age',1,'limit',3,'context','position_one_two_local');
+[sample,result]=nav_compare_sources(a,b,.5*eye(3),10,cfg);
+close(sample.value,[2;0;0],1e-12); close(result.nis,4,1e-12);
+assert(strcmp(result.status,'DISAGREEMENT'));
+a.value=a.value+[100;50;20]; b.value=b.value+[100;50;20];
+[~,same]=nav_compare_sources(a,b,.5*eye(3),10,cfg); close(same.nis,4,1e-12);
+[missing,result]=nav_compare_sources(a,b,.5*eye(3),12,cfg);
+assert(isempty(missing)&&strcmp(result.status,'NOT_READY'));
+b.quality='FAILED'; [missing,result]=nav_compare_sources(a,b,.5*eye(3),10,cfg);
+assert(isempty(missing)&&strcmp(result.status,'NOT_READY'));
+b.quality='VALID'; fails(@()nav_compare_sources(a,b,2*eye(3),10,cfg),'libekf:Covariance');
+watch=struct('windows',[1 2 3],'max_gap',1,'max_age',1,'capacity',10, ...
+    'instant_limit',1.5,'mean_limit',[10 10 10],'rms_limit',[10 10 10]);
+[~,alarm]=nav_watch([],sample,10,watch); assert(strcmp(alarm.status,'ALARM'));
+end
+
+function requirement_navigation_outage
+% Independent straight trajectory and physical measurements through one handler.
+[s,e]=fixture; e.C_e_l=[0 0 1;1 0 0;0 1 0]; e.Omega=zeros(3,1);
+e.gravity_origin=zeros(3,1); e.gravity_gradient=zeros(3); e.gravity_radius=1e5;
+e.max_step=.1; e.state_noise_density=eye(21)*1e-10;
+s.p=[5;2;99]; s.v=[1.2;.1;0]; s.q=[1;0;0;0]; s.ba=zeros(3,1); s.bg=zeros(3,1);
+s.wind=zeros(3,1); s.bh=0;
+P=diag([100*ones(3,1);ones(3,1);1e-4*ones(3,1);1e-8*ones(6,1);ones(3,1);1e-6;1;1]);
+f=struct('state',s,'P',P,'used',{{}},'capacity',500);
+sensor=struct('id',s.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
+stations=[100 0 0;-100 100 0;0 -100 0]; start=s.t;
+for k=1:20
+    stop=start+k*.1;
+    u=struct('model','inertial','source','imu','lineage',{{sprintf('imu_%d',k)}}, ...
+        'quality','VALID','frame','BODY','accel_unit','m/s^2','gyro_unit','rad/s', ...
+        't_start',f.state.t,'t_end',stop,'t_received',stop, ...
+        'accel',zeros(3,1),'gyro',zeros(3,1),'noise_density',eye(6)*1e-6);
+    % Decimal time representation may exceed .1 by rounding, not by physical duration.
+    e.max_step=.100000000001;
+    [f,info]=nav_assimilate(f,u,[],e,100); assert(info.accepted);
+    truth=[k*.1;0;100];
+    if k<=2 || k==10
+        m=packet(f.state,'gnss_position'); m.lever=zeros(3,1); m.frame='SENSOR_LOCAL';
+        m.z=truth; m.R=eye(3)*.01; m.lineage={sprintf('satellite_%d',k)};
+        if k==10, m.z=m.z+[10000;10000;0]; end
+        before=f; [f,info]=nav_assimilate(f,m,sensor,e,100);
+        if k==10, assert(~info.accepted&&isequal(f,before)); else, assert(info.accepted); end
+    end
+    for j=1:3
+        m=packet(f.state,'dme_range'); m.lever=zeros(3,1); m.frame='SENSOR_LOCAL';
+        m.station=stations(j,:).'; m.z=norm(truth-m.station); m.R=.04;
+        m.lineage={sprintf('dme_%d_%d',j,k)};
+        [f,info]=nav_assimilate(f,m,sensor,e,100); assert(info.accepted);
+    end
+    m=packet(f.state,'doppler_velocity'); m.lever=zeros(3,1); m.frame='SENSOR_LOCAL';
+    m.surface_velocity=zeros(3,1); m.z=[1;0;-1]/sqrt(2); m.R=eye(3)*.001;
+    m.lineage={sprintf('doppler_%d',k)};
+    [f,info]=nav_assimilate(f,m,sensor,e,100); assert(info.accepted);
+    m=packet(f.state,'baro_height'); m.lever=zeros(3,1); m.frame='SENSOR_LOCAL';
+    m.geoid_offset=0; m.z=hypot(e.ellipsoid_a+100,k*.1)-e.ellipsoid_a; m.R=.04;
+    m.lineage={sprintf('baro_%d',k)};
+    [f,info]=nav_assimilate(f,m,sensor,e,100); assert(info.accepted);
+end
+assert(norm(f.state.p-[2;0;100])<.1 && norm(f.state.v-[1;0;0])<.1);
+assert(f.state.t==start+2 && all(isfinite(f.P(:))));
+assert(~ismember('satellite_10',f.used));
+end

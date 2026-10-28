@@ -6,6 +6,12 @@ assert(isequal(size(P),[size(H,2) size(H,2)]) && all(isfinite(P(:))), ...
     'libekf:Covariance','Invalid prior covariance.');
 assert(norm(P-P.','fro')<=1e-12*max(norm(P,'fro'),realmin),'libekf:Covariance','Prior is not symmetric.');
 S=H*P*H.'+R;
+if isfield(obs,'state_noise_cov')
+    C=obs.state_noise_cov;
+    assert(isequal(size(C),[size(H,2) size(H,1)])&&all(isfinite(C(:))), ...
+        'libekf:Correlation','Invalid cross covariance.');
+    S=S+H*C+C.'*H.';
+end
 assert(all(isfinite(S(:))) && all(diag(S)>0),'libekf:Innovation','Nonfinite/nonpositive innovation covariance.');
 d=sqrt(diag(S));
 % Sequential division avoids forming d*d', which may overflow/underflow.

@@ -1,4 +1,5 @@
-function [out,Q]=nav_predict(s,P,imu,env)
+function [out,Q,T,N]=nav_predict(s,P,imu,env)
+% T переносит малые ошибки; N — накопленная ковариация нового шума.
 % Инерциальное продолжение в неподвижных местных осях, связанных с Землёй.
 % Ускорение — удельная сила, gyro — угловая скорость относительно инерциальных осей.
 % noise_density: спектральная матрица белого шума [accel;gyro], а не дисперсия отсчёта.
@@ -38,7 +39,8 @@ B=zeros(21,6); B(4:6,1:3)=-Cm; B(7:9,4:6)=-eye(3);
 W=B*imu.noise_density*B.'+env.state_noise_density;
 % Совместное интегрирование перехода и накопленной погрешности.
 E=expm([F W;zeros(21) -F.']*dt); T=E(1:21,1:21);
-Q=T*P*T.'+E(1:21,22:42)*T.'; Q=(Q+Q.')/2;
+N=E(1:21,22:42)*T.'; N=(N+N.')/2;
+Q=T*P*T.'+N; Q=(Q+Q.')/2;
 assert(all(isfinite(Q(:))) && all(isfinite([out.p;out.v;out.clock])), ...
     'libekf:Numerics','Inertial propagation overflow.');
 end

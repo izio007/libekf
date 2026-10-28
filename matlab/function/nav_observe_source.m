@@ -15,5 +15,6 @@ switch m.model
         W=eye(numel(obs.residual));
 end
 obs.residual=W*obs.residual; obs.H=W*obs.H; obs.R=W*obs.R*W.';
+if isfield(obs,'state_noise_cov'), obs.state_noise_cov=obs.state_noise_cov*W.'; end
 obs.source_frame_id=sensor.id;
 end

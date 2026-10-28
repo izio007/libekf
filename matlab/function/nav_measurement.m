@@ -27,7 +27,7 @@ fields={'p','v','ba','bg','wind'};
 for k=1:numel(fields), vector3(s.(fields{k})); end
 assert(all(isfinite([s.bh s.clock s.drift])) && ...
     all(cellfun(@(f)isscalar(s.(f)),{'bh','clock','drift'})), 'libekf:State','Invalid augmented state.');
-H=zeros(0,21); angular=[];
+H=zeros(0,21); angular=[]; added_variance=0; derived_cross=[];
 lever=zeros(3,1);
 if isfield(m,'lever'), lever=vector3(m.lever); end
 ps=s.p(:)+C*lever;
@@ -35,7 +35,7 @@ Jp=zeros(3,21); Jp(:,1:3)=eye(3); Jp(:,7:9)=-C*nav_skew(lever);
 switch m.model
     case {'gnss_position','external_position'}
         h=ps; H=Jp; units=repmat({'m'},3,1);
-    case {'gnss_velocity','external_velocity','gnss_position_velocity','external_position_velocity','range_rate'}
+    case {'gnss_velocity','external_velocity','gnss_position_velocity','external_position_velocity','range_rate','doppler_velocity'}
         if norm(lever)>0
             assert(isfield(m,'omega_ib') && isfield(env,'Omega'), 'libekf:Lever','Nonzero lever needs body rates and Earth rate.');
             omega=vector3(m.omega_ib)-s.bg(:); Omega=vector3(env.Omega);
@@ -47,7 +47,18 @@ switch m.model
         Jv=zeros(3,21); Jv(:,4:6)=eye(3);
         Jv(:,7:9)=-C*nav_skew(rot)+nav_skew(Omega)*C*nav_skew(lever);
         Jv(:,13:15)=C*nav_skew(lever);
-        if strcmp(m.model,'range_rate')
+        if strcmp(m.model,'doppler_velocity')
+            require_fields(m,{'beams_body','surface_valid','beam_geometry_valid','surface_velocity'});
+            beams=m.beams_body;
+            assert(size(beams,2)==3 && size(beams,1)>0 && all(isfinite(beams(:))) && ...
+                all(abs(sqrt(sum(beams.^2,2))-1)<1e-10) && ...
+                isequal(m.surface_valid,true) && isequal(m.beam_geometry_valid,true), ...
+                'libekf:Doppler','Invalid Doppler directions or reflecting surface.');
+            vb=C.'*(va-vector3(m.surface_velocity));
+            h=beams*vb; H=beams*C.'*Jv;
+            H(:,7:9)=H(:,7:9)+beams*nav_skew(vb);
+            units=repmat({'m/s'},size(beams,1),1);
+        elseif strcmp(m.model,'range_rate')
             assert(isfield(m,'geometry_at_epoch') && isequal(m.geometry_at_epoch,true), ...
                 'libekf:GeometryEpoch','Range-rate geometry must be prepared at observation epoch.');
             d=ps-vector3(m.station); rho=norm(d);
@@ -61,6 +72,23 @@ switch m.model
         else
             h=va; H=Jv; units=repmat({'m/s'},3,1);
         end
+    case 'cooperative_range'
+        require_fields(m,{'station','peer_covariance','peer_cross_cov','peer_cross_frame_id','peer_time','peer_valid'});
+        assert(isequal(m.peer_valid,true)&&isscalar(m.peer_time)&&m.peer_time==s.t, ...
+            'libekf:Peer','Peer position must be valid at measurement epoch.');
+        assert(~isfield(m,'state_noise_cov'),'libekf:Correlation','Specify peer dependence only once.');
+        V=m.peer_covariance; U=m.peer_cross_cov;
+        assert(isequal(size(V),[3 3])&&all(isfinite(V(:)))&& ...
+            norm(V-V.','fro')<=1e-12*max(norm(V,'fro'),realmin)&& ...
+            min(eig((V+V.')/2))>=0,'libekf:Covariance','Invalid peer covariance.');
+        assert(any(size(U,1)==[21 42])&&size(U,2)==3&&all(isfinite(U(:)))&& ...
+            strcmp(m.peer_cross_frame_id,s.frame_id), ...
+            'libekf:Correlation','Invalid common-state/peer covariance.');
+        delta=ps-vector3(m.station); distance=norm(delta);
+        assert(distance>0,'libekf:Geometry','Undefined peer range.');
+        direction=delta/distance; h=distance; H=direction.'*Jp; units={'m'};
+        added_variance=direction.'*V*direction;
+        derived_cross=-U*direction;
     case {'dme_range','pseudorange'}
         d=ps-vector3(m.station); rho=norm(d);
         assert(rho>0,'libekf:Geometry','Undefined range at station.');
@@ -70,18 +98,142 @@ switch m.model
                 'libekf:GeometryEpoch','Satellite transmit/receive geometry must be prepared.');
             h=h+s.clock+m.range_correction; H(20)=H(20)+1;
         end
-    case 'vor_azimuth'
+    case {'vor_azimuth','station_range_azimuth'}
+        require_fields(m,{'basis','station','azimuth_offset'});
         B=basis(m.basis); d=ps-vector3(m.station);
         east=B(:,1).'*d; north=B(:,2).'*d; r2=east^2+north^2;
         assert(r2>0,'libekf:Geometry','Undefined azimuth above station.');
         h=atan2(east,north)+m.azimuth_offset;
         H=(north*B(:,1).'-east*B(:,2).')/r2*Jp;
         units={'rad'}; angular=1;
+        if strcmp(m.model,'station_range_azimuth')
+            rho=norm(d); h=[rho;h]; H=[d.'/rho*Jp;H];
+            units={'m';'rad'}; angular=2;
+        end
+    case {'optical_landmarks','celestial_pixels'}
+        require_fields(m,{'calibration_valid','matches_valid','camera_to_body','intrinsics'});
+        celestial=strcmp(m.model,'celestial_pixels');
+        if celestial
+            require_fields(m,{'directions','geometry_at_epoch','catalog_valid','min_forward'});
+            points=m.directions; depth=m.min_forward;
+            assert(isequal(m.geometry_at_epoch,true)&&isequal(m.catalog_valid,true)&& ...
+                size(points,2)==3&&all(abs(sqrt(sum(points.^2,2))-1)<1e-10), ...
+                'libekf:Optical','Invalid prepared celestial directions.');
+        else
+            require_fields(m,{'map_valid','landmarks','min_depth'});
+            assert(isequal(m.map_valid,true),'libekf:Optical','Unusable landmark map.');
+            points=m.landmarks; depth=m.min_depth;
+        end
+        assert(isequal(m.calibration_valid,true)&&isequal(m.matches_valid,true), ...
+            'libekf:Optical','Unusable camera calibration or correspondence.');
+        D=basis(m.camera_to_body);
+        assert(abs(det(D)-1)<1e-10,'libekf:Optical','Camera axes must preserve handedness.');
+        intr=m.intrinsics(:);
+        assert(numel(intr)==4 && all(isfinite(intr)) && all(intr(1:2)>0) && ...
+            size(points,2)==3 && size(points,1)>0 && all(isfinite(points(:))) && ...
+            isscalar(depth)&&isfinite(depth)&&depth>0, ...
+            'libekf:Optical','Invalid camera or landmark geometry.');
+        n=size(points,1); h=zeros(2*n,1); H=zeros(2*n,21);
+        for j=1:n
+            if celestial, vb=C.'*points(j,:).'; else, vb=C.'*(points(j,:).'-ps); end
+            vc=D.'*vb;
+            assert(vc(3)>depth,'libekf:Optical','Landmark behind or too near camera.');
+            rows=2*j-1:2*j;
+            h(rows)=[intr(1)*vc(1)/vc(3)+intr(3);intr(2)*vc(2)/vc(3)+intr(4)];
+            if celestial, J=zeros(3,21); else, J=-C.'*Jp; end
+            J(:,7:9)=J(:,7:9)+nav_skew(vb);
+            projection=[intr(1)/vc(3) 0 -intr(1)*vc(1)/vc(3)^2; ...
+                0 intr(2)/vc(3) -intr(2)*vc(2)/vc(3)^2];
+            H(rows,:)=projection*D.'*J;
+        end
+        units=repmat({'pixel'},2*n,1);
+    case 'magnetic_vector'
+        require_fields(m,{'field_valid','calibration_valid','field_gradient','field_radius','field_time','field_origin','field_vector'});
+        assert(isfield(m,'field_valid') && isequal(m.field_valid,true) && ...
+            isfield(m,'calibration_valid') && isequal(m.calibration_valid,true), ...
+            'libekf:Magnetic','Unusable magnetic field or calibration.');
+        G=m.field_gradient; radius=m.field_radius;
+        assert(isequal(size(G),[3 3]) && all(isfinite(G(:))) && ...
+            isscalar(radius)&&isfinite(radius)&&radius>0, ...
+            'libekf:Magnetic','Invalid local magnetic model.');
+        assert(isscalar(m.field_time)&&isfinite(m.field_time)&& ...
+            abs(m.field_time-s.t)<=env.time_tolerance, ...
+            'libekf:Epoch','Magnetic model must be prepared at measurement epoch.');
+        dp=ps-vector3(m.field_origin);
+        assert(norm(dp)<=radius,'libekf:Magnetic','Outside magnetic model domain.');
+        field=vector3(m.field_vector)+G*dp;
+        assert(norm(field)>0,'libekf:Magnetic','Zero reference magnetic field.');
+        h=C.'*field; H=C.'*G*Jp;
+        H(:,7:9)=H(:,7:9)+nav_skew(h);
+        units=repmat({'T'},3,1);
+    case 'adf_bearing'
+        require_fields(m,{'bearing_geometry_valid','station','bearing_offset'});
+        assert(isequal(m.bearing_geometry_valid,true),'libekf:Bearing','Uncalibrated bearing geometry.');
+        vb=C.'*(vector3(m.station)-ps); x=vb(1); y=vb(2); r2=x*x+y*y;
+        assert(r2>0,'libekf:Geometry','Relative bearing undefined on body vertical.');
+        D=[-y/r2 x/r2 0]; J=-C.'*Jp; J(:,7:9)=J(:,7:9)+nav_skew(vb);
+        h=atan2(y,x)+m.bearing_offset; H=D*J; units={'rad'}; angular=1;
+    case {'range_difference','time_difference'}
+        require_fields(m,{'geometry_at_epoch','station','reference_station','range_correction'});
+        assert(isequal(m.geometry_at_epoch,true),'libekf:GeometryEpoch','Unprepared timing geometry.');
+        da=ps-vector3(m.station); db=ps-vector3(m.reference_station);
+        ra=norm(da); rb=norm(db);
+        assert(ra>0&&rb>0,'libekf:Geometry','Undefined range difference at a station.');
+        h=ra-rb+m.range_correction; H=(da.'/ra-db.'/rb)*Jp; units={'m'};
+        if strcmp(m.model,'time_difference')
+            require_fields(m,{'propagation_speed'});
+            assert(isscalar(m.propagation_speed)&&isfinite(m.propagation_speed)&&m.propagation_speed>0, ...
+                'libekf:Propagation','Invalid propagation speed.');
+            h=h/m.propagation_speed; H=H/m.propagation_speed; units={'s'};
+        end
+    case 'rsdn_time_difference'
+        require_fields(m,{'geometry_at_epoch','stations','propagation_speed','time_correction','reference_station'});
+        assert(isequal(m.geometry_at_epoch,true),'libekf:GeometryEpoch','Unprepared RSDN timing geometry.');
+        stations=m.stations; speed=m.propagation_speed;
+        assert(size(stations,2)==3&&size(stations,1)>0&&all(isfinite(stations(:)))&& ...
+            isscalar(speed)&&isfinite(speed)&&speed>0,'libekf:Geometry','Invalid RSDN stations.');
+        correction=m.time_correction(:);
+        assert(numel(correction)==size(stations,1)&&all(isfinite(correction)), ...
+            'libekf:Time','Invalid transmitter and propagation corrections.');
+        d=ps.'-stations; ranges=sqrt(sum(d.^2,2));
+        dr=ps-vector3(m.reference_station); rr=norm(dr);
+        assert(all(ranges>0)&&rr>0,'libekf:Geometry','RSDN geometry undefined at a station.');
+        h=(ranges-rr)/speed+correction;
+        H=(d./ranges-dr.'/rr)*Jp/speed;
+        units=repmat({'s'},size(stations,1),1);
     case 'baro_height'
         B=basis(env.C_e_l);
         [height,up_e]=nav_height_local(ps,env);
         up=B.'*up_e;
         h=height-m.geoid_offset+s.bh; H=up.'*Jp; H(19)=H(19)+1; units={'m'};
+    case 'static_pressure'
+        require_fields(m,{'geoid_offset','atmosphere','pressure_valid','calibration_valid'});
+        a=m.atmosphere;
+        require_fields(a,{'height','pressure','temperature','gradient','gravity','gas_constant', ...
+            'min_height','max_height','time_start','time_end','valid'});
+        parameters=[a.height a.pressure a.temperature a.gradient a.gravity a.gas_constant ...
+            a.min_height a.max_height a.time_start a.time_end];
+        assert(numel(parameters)==10&&all(isfinite(parameters))&&isreal(parameters)&& ...
+            a.pressure>0&&a.temperature>0&&a.gravity>0&&a.gas_constant>0&& ...
+            a.min_height<a.max_height&&a.time_start<=s.t&&s.t<=a.time_end&& ...
+            isequal(a.valid,true)&&isequal(m.pressure_valid,true)&&isequal(m.calibration_valid,true)&& ...
+            isscalar(m.geoid_offset)&&isfinite(m.geoid_offset), ...
+            'libekf:Atmosphere','Invalid pressure source or atmosphere domain.');
+        [height,up_e]=nav_height_local(ps,env);
+        altitude=height-m.geoid_offset+s.bh; delta=altitude-a.height;
+        temperature=a.temperature+a.gradient*delta;
+        assert(altitude>=a.min_height&&altitude<=a.max_height&&temperature>0&& ...
+            isscalar(m.z)&&isreal(m.z)&&isfinite(m.z)&&m.z>0, ...
+            'libekf:Atmosphere','Pressure or height outside the atmosphere domain.');
+        if a.gradient==0
+            exponent=-a.gravity*delta/(a.gas_constant*a.temperature);
+        else
+            exponent=-a.gravity/(a.gas_constant*a.gradient)*log1p(a.gradient*delta/a.temperature);
+        end
+        h=a.pressure*exp(exponent);
+        assert(isfinite(h)&&h>0,'libekf:Atmosphere','Pressure outside numerical range.');
+        H=(env.C_e_l.'*up_e).'*Jp; H(19)=H(19)+1;
+        H=-a.gravity*h/(a.gas_constant*temperature)*H; units={'Pa'};
     case 'airdata'
         vb=C.'*(s.v(:)-s.wind(:)); speed=norm(vb); x=vb(1); y=vb(2); z=vb(3);
         r2=x*x+z*z; d=sqrt(r2);
@@ -152,6 +304,7 @@ assert(isequal(size(R),[numel(h) numel(h)]) && all(isfinite(R(:))) && ...
     norm(R-R.','fro')<=1e-12*max(norm(R,'fro'),realmin), 'libekf:Covariance','R must be finite and symmetric.');
 [~,flag]=chol(R);
 assert(flag==0,'libekf:Covariance','This observation profile requires positive definite R.');
+R=R+added_variance;
 if ~isempty(Rtransform), R=Rtransform*R*Rtransform.'; end
 residual=z-h;
 residual(angular)=atan2(sin(residual(angular)),cos(residual(angular)));
@@ -159,6 +312,20 @@ obs=struct('predicted',h,'residual',residual,'H',H,'R',R,'units',{units}, ...
     'source',m.source,'model',m.model,'t_measure',m.t_measure,'t_received',m.t_received, ...
     'frame_id',m.frame_id, ...
     'lineage',{m.lineage},'correlation_group',m.correlation_group,'noise_model',m.noise_model);
+if ~isempty(derived_cross)
+    obs.state_noise_cov=derived_cross;
+    obs.peer_covariance=m.peer_covariance;
+    obs.peer_cross_cov=m.peer_cross_cov;
+end
+if isfield(m,'state_noise_cov')
+    U=m.state_noise_cov;
+    assert(isfield(m,'state_noise_frame_id')&&strcmp(m.state_noise_frame_id,s.frame_id)&& ...
+        any(size(U,1)==[21 42])&&size(U,2)==numel(h)&&all(isfinite(U(:))), ...
+        'libekf:Correlation','Cross covariance rows must use common-state error axes.');
+    if ~isempty(Rtransform), U=U*Rtransform.'; end
+    obs.state_noise_cov=U;
+end
+
 end
 
 function v=vector3(v)
@@ -170,4 +337,10 @@ end
 function B=basis(B)
 assert(isequal(size(B),[3 3]) && all(isfinite(B(:))) && norm(B.'*B-eye(3),'fro')<1e-10, ...
     'libekf:Geometry','Expected orthonormal geometry basis.');
+end
+
+function require_fields(packet,names)
+for k=1:numel(names)
+    assert(isfield(packet,names{k}),'libekf:Packet',['Missing model field ' names{k}]);
+end
 end
