@@ -59,6 +59,7 @@ switch m.model
             H(:,7:9)=H(:,7:9)+beams*nav_skew(vb);
             units=repmat({'m/s'},size(beams,1),1);
         elseif strcmp(m.model,'range_rate')
+            require_fields(m,{'station','station_velocity','rate_correction','geometry_at_epoch'});
             assert(isfield(m,'geometry_at_epoch') && isequal(m.geometry_at_epoch,true), ...
                 'libekf:GeometryEpoch','Range-rate geometry must be prepared at observation epoch.');
             d=ps-vector3(m.station); rho=norm(d);
@@ -90,10 +91,12 @@ switch m.model
         added_variance=direction.'*V*direction;
         derived_cross=-U*direction;
     case {'dme_range','pseudorange'}
+        require_fields(m,{'station'});
         d=ps-vector3(m.station); rho=norm(d);
         assert(rho>0,'libekf:Geometry','Undefined range at station.');
         h=rho; H=d.'/rho*Jp; units={'m'};
         if strcmp(m.model,'pseudorange')
+            require_fields(m,{'geometry_at_epoch','range_correction'});
             assert(isfield(m,'geometry_at_epoch') && isequal(m.geometry_at_epoch,true), ...
                 'libekf:GeometryEpoch','Satellite transmit/receive geometry must be prepared.');
             h=h+s.clock+m.range_correction; H(20)=H(20)+1;
@@ -202,6 +205,9 @@ switch m.model
         H=(d./ranges-dr.'/rr)*Jp/speed;
         units=repmat({'s'},size(stations,1),1);
     case 'baro_height'
+        require_fields(m,{'geoid_offset'});
+        assert(isscalar(m.geoid_offset)&&isreal(m.geoid_offset)&&isfinite(m.geoid_offset), ...
+            'libekf:Height','Invalid geoid offset.');
         B=basis(env.C_e_l);
         [height,up_e]=nav_height_local(ps,env);
         up=B.'*up_e;
@@ -276,6 +282,8 @@ switch m.model
         J=zeros(3,21); J(:,4:6)=C.'; J(:,7:9)=nav_skew(vb); J(:,16:18)=-C.';
         H=D*J; units={'m/s';'rad';'rad'}; angular=[2 3];
     case {'radar_range','radar_terrain','radar_footprint'}
+        require_fields(m,{'beam_body','coverage_complete','terrain_quality','nearest_return_valid', ...
+            'vertices','faces','half_angle','edge_margin','max_valid_range'});
         beam=unit(m.beam_body);
         assert(isfield(m,'coverage_complete') && isequal(m.coverage_complete,true) && ...
             isfield(m,'terrain_quality') && strcmp(m.terrain_quality,'VALID'), ...
@@ -295,6 +303,9 @@ switch m.model
         end
         units={'m'};
     case 'ils_angles'
+        require_fields(m,{'basis','station','angle_reference'});
+        assert(numel(m.angle_reference)==2&&isreal(m.angle_reference)&&all(isfinite(m.angle_reference(:))), ...
+            'libekf:Geometry','ILS needs two calibrated reference angles.');
         B=basis(m.basis); d=B.'*(ps-vector3(m.station));
         x=d(1); y=d(2); z=d(3); horizontal=hypot(x,y); distance2=d.'*d;
         assert(x>0 && horizontal>0, 'libekf:Geometry','Outside calibrated forward approach sector.');
@@ -303,6 +314,7 @@ switch m.model
             -z*x/(distance2*horizontal) -z*y/(distance2*horizontal) horizontal/distance2];
         H=D*B.'*Jp; units={'rad';'rad'}; angular=[1 2];
     case 'gls_deviation'
+        require_fields(m,{'projection','path_origin'});
         M=m.projection;
         assert(isequal(size(M),[2 3]) && all(isfinite(M(:))) && norm(M*M.'-eye(2),'fro')<1e-10, ...
             'libekf:Geometry','GLS projection needs orthonormal lateral/vertical rows.');

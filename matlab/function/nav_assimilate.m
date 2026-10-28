@@ -11,7 +11,8 @@ out=filter;
 result=struct('accepted',false,'reason','','nis',NaN);
 try
     % Проверяем физическую модель и договор измерения до изменения состояния.
-    assert(isfield(packet,'model'),'libekf:Packet','Missing physical model.');
+    assert(isstruct(packet)&&isscalar(packet)&&isfield(packet,'model')&& ...
+        ischar(packet.model)&&~isempty(packet.model),'libekf:Packet','Missing physical model.');
     if nargin>=6
         assert(isstruct(reception)&&isscalar(reception)&& ...
             isfield(reception,'now')&&isfield(reception,'max_age')&& ...

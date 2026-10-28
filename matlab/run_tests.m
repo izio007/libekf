@@ -4,7 +4,7 @@ base=fileparts(mfilename('fullpath')); addpath(fullfile(base,'function'));
 cases={@requirement_source_models,@requirement_coordinates_and_terrain, ...
     @requirement_numerical_invariance,@requirement_broad_radar,@requirement_common_correction, ...
     @requirement_source_provenance,@requirement_inertial_motion,@requirement_watch_intervals, ...
-    @requirement_terrain_sequence,@requirement_all_source_fusion,@requirement_relative_camera_motion,@requirement_joint_correction,@requirement_visual_ambiguity,@requirement_correlated_measurement,@requirement_source_comparison,@requirement_navigation_outage,@requirement_interval_observations,@requirement_observable_quantities};
+    @requirement_terrain_sequence,@requirement_all_source_fusion,@requirement_relative_camera_motion,@requirement_joint_correction,@requirement_visual_ambiguity,@requirement_correlated_measurement,@requirement_source_comparison,@requirement_navigation_outage,@requirement_interval_observations,@requirement_observable_quantities,@requirement_all_source_timing};
 names={'Показания соответствуют физическим моделям источников', ...
     'Смена координат сохраняет результат; неоднозначность рельефа не скрывается', ...
     'Мера расхождения сохраняется при смене единиц и масштаба', ...
@@ -22,7 +22,8 @@ names={'Показания соответствуют физическим мо�
     'Сравнение источников учитывает общие ошибки и передаёт расхождение сторожу', ...
     'Общая оценка продолжается без спутников и отклоняет ложную координату', ...
     'Измерения внутри инерциального интервала учитываются в своё время', ...
-    'Исправные источники определяют только наблюдаемые величины'};
+    'Исправные источники определяют только наблюдаемые величины', ...
+    'Все источники учитывают своё время при пересчёте истории'};
 checks=repmat(struct('requirement','','passed',false,'error',''),1,numel(cases));
 for k=1:numel(cases)
     checks(k).requirement=names{k};
@@ -38,11 +39,7 @@ status=struct('passed',all([checks.passed]),'checks',checks);
 end
 function requirement_all_source_fusion
 [s,e]=fixture;
-models={'gnss_position','external_position','gnss_velocity','external_velocity', ...
-    'gnss_position_velocity','external_position_velocity','dme_range','pseudorange', ...
-    'range_rate','vor_azimuth','baro_height','airdata','radar_range','ils_angles', ...
-    'gls_deviation','attitude','radar_footprint','doppler_velocity', ...
-    'adf_bearing','station_range_azimuth','range_difference','time_difference','rsdn_time_difference','magnetic_vector','optical_landmarks','celestial_pixels','cooperative_range','static_pressure','impact_pressure','air_pressures'};
+models=source_models;
 sensor0=struct('id',s.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
 R=nav_rotation([cos(.4);sin(.4)/sqrt(3)*ones(3,1)]); offset=[10;20;-30];
 sensor1=struct('id','rotated_sensor','origin_ecef',e.origin_ecef+e.C_e_l*offset, ...
@@ -193,6 +190,15 @@ function requirement_source_provenance
 sensor=struct('id',s.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
 initial=struct('state',s,'P',eye(21),'used',{{}},'capacity',100);
 cases={ ...
+    'dme_range',{'station'}; ...
+    'pseudorange',{'station','geometry_at_epoch','range_correction'}; ...
+    'range_rate',{'station','station_velocity','rate_correction','geometry_at_epoch'}; ...
+    'baro_height',{'geoid_offset'}; ...
+    'ils_angles',{'basis','station','angle_reference'}; ...
+    'gls_deviation',{'projection','path_origin'}; ...
+    'radar_footprint',{'beam_body','coverage_complete','terrain_quality','nearest_return_valid', ...
+        'vertices','faces','half_angle','edge_margin','max_valid_range'}; ...
+    'air_pressures',{'geoid_offset','atmosphere','pressure_valid','calibration_valid','gamma','max_mach','flow_valid'}; ...
     'optical_landmarks',{'calibration_valid','matches_valid','map_valid','camera_to_body','intrinsics','landmarks','min_depth'}; ...
     'magnetic_vector',{'field_valid','calibration_valid','field_gradient','field_radius','field_time','field_origin','field_vector'}; ...
     'rsdn_time_difference',{'geometry_at_epoch','stations','propagation_speed','time_correction','reference_station'}; ...
@@ -251,11 +257,7 @@ end
 function requirement_source_models
 % Independent geometric cases, manifold derivatives and invalid contracts.
 [s,e]=fixture;
-models={'gnss_position','external_position','gnss_velocity','external_velocity', ...
-    'gnss_position_velocity','external_position_velocity','dme_range','pseudorange', ...
-    'range_rate','vor_azimuth','baro_height','airdata','radar_range','ils_angles', ...
-    'gls_deviation','attitude','radar_footprint','doppler_velocity', ...
-    'adf_bearing','station_range_azimuth','range_difference','time_difference','rsdn_time_difference','magnetic_vector','optical_landmarks','celestial_pixels','cooperative_range','static_pressure','impact_pressure','air_pressures'};
+models=source_models;
 for k=1:numel(models)
     m=packet(s,models{k}); o=nav_measurement(s,m,e);
     assert(all(size(o.H)==[numel(o.residual),21]));
@@ -464,6 +466,10 @@ s.v=[3;4;0]; s.wind=zeros(3,1);
 
 % Known 90-degree body-to-ECEF rotation and antenna kinematics.
 s.q=[cos(pi/4);0;0;sin(pi/4)]; s.bg=zeros(3,1); e.Omega=zeros(3,1);
+bad=packet(s,'ils_angles'); bad.angle_reference=0;
+fails(@()nav_measurement(s,bad,e),'libekf:Geometry');
+bad=packet(s,'baro_height'); bad.geoid_offset=[0;0];
+fails(@()nav_measurement(s,bad,e),'libekf:Height');
 m=packet(s,'gnss_position'); m.lever=[1;0;0];
 close(nav_measurement(s,m,e).predicted,s.p+[0;1;0],1e-9);
 m=packet(s,'gnss_velocity'); m.lever=[1;0;0]; m.omega_ib=[0;0;2];
@@ -956,6 +962,50 @@ m=packet(b,'gnss_position'); m.frame='SENSOR_LOCAL'; m.lever=zeros(3,1);
 m.z=[2;0;0]; m.R=eye(3); m.lineage={'middle_position'};
 [x,info]=nav_assimilate_interval(f,u,{m},{sensor},e,100);
 assert(info.accepted&&info.observations{1}.accepted&&x.state.t==u.t_end);
+% A late observation in an earlier interval reconstructs the same estimate as timely processing.
+second=u; second.t_start=u.t_end; second.t_end=u.t_end+1;
+second.t_received=second.t_end; second.lineage={'second_imu_interval'};
+late=m; late.t_received=second.t_end+.5;
+boundary=m; boundary.t_measure=u.t_end; boundary.t_received=second.t_end;
+boundary.z=[2;0;0]; boundary.lineage={'boundary_position'};
+[without,ri]=nav_replay(f,{u,second},{boundary},{sensor},e,100); assert(ri.accepted);
+[replayed,ri]=nav_replay(f,{u,second},{boundary,late},{sensor,sensor},e,100);
+assert(ri.accepted&&all(cellfun(@(z)z.accepted,ri.observations)));
+[timely,ti]=nav_assimilate_interval(f,u,{m,boundary},{sensor,sensor},e,100); assert(ti.accepted);
+[timely,ti]=nav_assimilate(timely,second,[],e,100); assert(ti.accepted);
+close(replayed.state.p,timely.state.p,1e-12); close(replayed.jointP,timely.jointP,1e-12);
+assert(norm(replayed.state.p-without.state.p)>0&&numel(replayed.used)==4);
+[again,ri]=nav_replay(f,{u,second},{boundary,late},{sensor,sensor},e,100);
+assert(ri.accepted&&isequal(again,replayed)); % Replaying does not add information twice.
+old=late; old.t_measure=a.t-.5; old.lineage={'before_snapshot'};
+[again,ri]=nav_replay(f,{u,second},{boundary,late,old},{sensor,sensor,sensor},e,100);
+assert(ri.accepted&&~ri.observations{3}.accepted&&isequal(again,replayed));
+broken=second; broken.t_start=broken.t_start+.1;
+[same,ri]=nav_replay(f,{u,broken},{late},{sensor},e,100);
+assert(~ri.accepted&&isequal(same,f)); % No partially reconstructed result escapes a history gap.
+% Camera reference changes are replayed as actions, without inventing measurements.
+cam=struct('model','visual_odometry','source','camera','lineage',{{'frame_a','frame_b'}}, ...
+    'quality','VALID','noise_model','independent','correlation_group','camera','frame_id',a.frame_id, ...
+    't_start',a.t,'t_end',u.t_end,'t_received',u.t_end,'units',{{'m';'m';'m'}}, ...
+    'z',[2;0;0],'R',eye(3),'camera_to_body',eye(3),'lever',zeros(3,1), ...
+    'scale_valid',true,'calibration_valid',true);
+cam2=cam; cam2.t_start=second.t_start; cam2.t_end=second.t_end;
+cam2.t_received=second.t_end; cam2.lineage={'frame_c','frame_d'};
+save=struct('model','save_reference','t_measure',u.t_end);
+[replayed,ri]=nav_replay(f,{u,second},{late,cam,save,cam2},{sensor,[],[],[]},e,100);
+assert(ri.accepted&&all(cellfun(@(z)z.accepted,ri.observations)));
+[timely,ti]=nav_assimilate_interval(f,u,{m,cam},{sensor,[]},e,100); assert(ti.accepted);
+timely=nav_save_reference(timely);
+[timely,ti]=nav_assimilate_interval(timely,second,{cam2},{[]},e,100); assert(ti.accepted);
+close(replayed.state.p,timely.state.p,1e-12); close(replayed.jointP,timely.jointP,1e-12);
+assert(replayed.reference.t==u.t_end&&numel(replayed.used)==7);
+% A replacement reference does not make an already used frame independent.
+cam2.lineage={'frame_b','frame_d'};
+[with_repeat,ri]=nav_replay(f,{u,second},{late,cam,save,cam2},{sensor,[],[],[]},e,100);
+assert(ri.accepted&&~ri.observations{4}.accepted&&numel(with_repeat.used)==5);
+% Reversing equal-time reference/action order cannot silently reinterpret the camera pair.
+[~,ri]=nav_replay(f,{u,second},{save,cam},{[],[]},e,100);
+assert(ri.accepted&&ri.observations{1}.accepted&&~ri.observations{2}.accepted);
 % Independent scalar p-v-bias state transition, conditioning at t=1/2, then to t=1.
 F=[1 .5 -.125;0 1 -.5;0 0 1]; Pmid=F*F.'; H=[1 0 0];
 K=Pmid*H.'/(H*Pmid*H.'+1); correction=F*K;
@@ -1238,4 +1288,75 @@ control.checks.altitude={alarm}; control.geometry.H(2,:)=o.H;
 out=nav_geodetic_output(s,eye(21),e,control);
 assert(strcmp(out.quality.altitude,'ALARM')&&~out.observable(3));
 
+end
+
+function models=source_models
+models={'gnss_position','external_position','gnss_velocity','external_velocity', ...
+    'gnss_position_velocity','external_position_velocity','dme_range','pseudorange', ...
+    'range_rate','vor_azimuth','baro_height','airdata','radar_range','ils_angles', ...
+    'gls_deviation','attitude','radar_footprint','doppler_velocity', ...
+    'adf_bearing','station_range_azimuth','range_difference','time_difference','rsdn_time_difference','magnetic_vector','optical_landmarks','celestial_pixels','cooperative_range','static_pressure','impact_pressure','air_pressures'};
+end
+
+function requirement_all_source_timing
+[s,e]=fixture; s.ba=zeros(3,1); s.bg=zeros(3,1);
+e.Omega=zeros(3,1); e.gravity_origin=zeros(3,1); e.gravity_gradient=zeros(3);
+e.gravity_radius=1e5; e.max_step=.125; e.state_noise_density=eye(21)*1e-8;
+u=struct('model','inertial','source','imu','lineage',{{'timing_imu'}},'quality','VALID', ...
+    'frame','BODY','accel_unit','m/s^2','gyro_unit','rad/s','t_start',s.t, ...
+    't_end',s.t+.125,'t_received',s.t+.125,'accel',zeros(3,1),'gyro',zeros(3,1), ...
+    'noise_density',eye(6)*1e-6);
+f=struct('state',s,'P',eye(21),'used',{{}},'capacity',100);
+sensor=struct('id',s.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
+first=u; first.t_end=s.t+.0625;
+[mid,midP]=nav_predict(s,f.P,first,e);
+second=u; second.t_start=mid.t;
+[plain,info]=nav_assimilate(f,u,[],e,1e8); assert(info.accepted);
+required=fieldnames(u);
+for j=1:numel(required)
+    incomplete=rmfield(u,required{j});
+    [unchanged,failed]=nav_assimilate(f,incomplete,[],e,1e8);
+    assert(~failed.accepted&&isequal(unchanged,f));
+end
+bad=u; bad.t_start=[s.t s.t];
+[unchanged,failed]=nav_assimilate(f,bad,[],e,1e8);
+assert(~failed.accepted&&isequal(unchanged,f));
+models=source_models;
+for k=1:numel(models)
+    m=packet(mid,models{k}); m.frame='SENSOR_LOCAL'; m.t_received=u.t_end+1;
+    at_measurement=f; at_measurement.state=mid; at_measurement.P=midP;
+    [reference,info]=nav_assimilate(at_measurement,m,sensor,e,1e8);
+    assert(info.accepted,'libekf:Timing','Reference %s rejected: %s',models{k},info.reason);
+    [reference.state,reference.P]=nav_predict(reference.state,reference.P,second,e);
+    [replayed,info]=nav_replay(f,{u},{m},{sensor},e,1e8);
+    assert(info.accepted&&info.observations{1}.accepted,'libekf:Timing', ...
+        'Delayed %s rejected',models{k});
+    close(replayed.state.p,reference.state.p,1e-10);
+    close(replayed.state.v,reference.state.v,1e-10);
+    close(nav_rotation(replayed.state.q),nav_rotation(reference.state.q),1e-10);
+    close(replayed.P,reference.P,1e-10);
+    assert(replayed.state.t==u.t_end&&numel(replayed.used)==2);
+    % Missing contract data reject only the packet; adapters must not throw raw field errors.
+    required={'source','model','z','R','units','frame','frame_id','t_measure','t_received', ...
+        'quality','lineage','correlation_group','noise_model'};
+    for j=1:numel(required)
+        incomplete=rmfield(m,required{j});
+        [unchanged,failed]=nav_assimilate(at_measurement,incomplete,sensor,e,1e8);
+        assert(~failed.accepted&&isequal(unchanged,at_measurement),'libekf:PacketContract', ...
+            '%s accepted missing %s',models{k},required{j});
+    end
+    if any(strcmp(models{k},{'gnss_position','external_position','gnss_velocity','external_velocity', ...
+            'gnss_position_velocity','external_position_velocity'}))
+        malformed=m; malformed.z=m.z(1:end-1);
+        [unchanged,failed]=nav_assimilate(at_measurement,malformed,sensor,e,1e8);
+        assert(~failed.accepted&&strcmp(failed.reason,'libekf:Dimension')&&isequal(unchanged,at_measurement));
+        malformed=m; malformed.R=m.R(1:end-1,1:end-1);
+        [unchanged,failed]=nav_assimilate(at_measurement,malformed,sensor,e,1e8);
+        assert(~failed.accepted&&strcmp(failed.reason,'libekf:Dimension')&&isequal(unchanged,at_measurement));
+    end
+    % A failed source must not affect propagation, regardless of its physical model.
+    m.quality='FAILED';
+    [replayed,info]=nav_replay(f,{u},{m},{sensor},e,1e8);
+    assert(info.accepted&&~info.observations{1}.accepted&&isequal(replayed,plain));
+end
 end

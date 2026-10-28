@@ -3,6 +3,8 @@ function out=nav_packet_from_sensor(m, sensor, env)
 % Velocity fields mean Earth-relative physical vectors expressed in the frame,
 % not coordinate derivatives in a moving frame. Calibrated body angles/scalars
 % retain their native meaning. Sensor axes and Earth anchor are explicit.
+assert(isstruct(m)&&isscalar(m)&&all(isfield(m,{'model','z','R','frame','frame_id'})), ...
+    'libekf:Packet','Incomplete sensor packet.');
 assert(strcmp(m.frame,'SENSOR_LOCAL') && strcmp(m.frame_id,sensor.id), ...
     'libekf:Frame','Wrong sensor-local frame ID.');
 B=env.C_e_l; A=sensor.C_e_s;

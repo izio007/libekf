@@ -29,7 +29,13 @@ try
     for k=order
         if ~isfinite(epochs(k)), continue; end
         trial=advance(candidate,imu,epochs(k),env);
-        [trial,checks{k}]=nav_assimilate(trial,packets{k},sensors{k},env,limit,args{:});
+        if strcmp(packets{k}.model,'save_reference')
+            % Явное действие истории: снимок не добавляет измерительной информации.
+            trial=nav_save_reference(trial);
+            checks{k}=struct('accepted',true,'reason','Опора сохранена','nis',NaN);
+        else
+            [trial,checks{k}]=nav_assimilate(trial,packets{k},sensors{k},env,limit,args{:});
+        end
         % Отвергнутое наблюдение не меняет даже разбиение интегрирования ИНС.
         if checks{k}.accepted, candidate=trial; end
     end
