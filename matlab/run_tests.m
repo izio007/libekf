@@ -1063,6 +1063,64 @@ end
 
 
 function requirement_correlated_measurement
+[state,environment]=fixture;
+% Аналитическая совместная поправка: собственная координата, опора и ошибка прибора.
+P=eye(21); H=zeros(1,21); H(1)=1;
+U=zeros(21,3); U(1,1)=.2; Uf=zeros(21,1); Uf(1)=.1;
+future=struct('ids',{{'calibration'}},'units',{{'m'}},'mean',0,'covariance',3, ...
+    'cross_cov',Uf,'measurement_cross_cov',-.3,'state_times',state.t, ...
+    'frame_id',state.frame_id,'peer_cross_cov',[.3;0;0],'peer_time',state.t,'peer_ids',{{'peer'}});
+o=struct('H',H,'R',3,'residual',3.6,'noise_model','joint_required', ...
+    'state_noise_cov',-U(:,1),'frame_id',state.frame_id,'t_measure',state.t, ...
+    'units',{{'m'}},'peer_covariance',diag([2 1 1]),'peer_cross_cov',U, ...
+    'peer_jacobian',[-1 0 0],'peer_noise_cov',1,'peer_position',zeros(3,1), ...
+    'peer_time',state.t,'peer_ids',{{'peer'}},'future_noise',future);
+[updated,Q,info]=nav_correct(state,P,o,100);
+assert(info.accepted); close(updated.p(1)-state.p(1),.8,1e-12);
+close(info.peer_update.position,[-1.8;0;0],1e-12);
+close(info.future_noise_update.mean,-.2,1e-12);
+% Независимый эталон условной ковариации трёх скалярных величин.
+prior=[1 .2 .1;.2 2 .3;.1 .3 3]; response=[.8;-1.8;-.2];
+expected=prior-response*response.'/3.6;
+actual=[Q(1,1),info.peer_update.cross_cov(1,1),info.future_noise_update.cross_cov(1); ...
+    info.peer_update.cross_cov(1,1),info.peer_update.covariance(1,1),info.future_noise_update.peer_cross_cov(1); ...
+    info.future_noise_update.cross_cov(1),info.future_noise_update.peer_cross_cov(1),info.future_noise_update.covariance];
+close(actual,expected,1e-12);
+% Следующая независимая дальность использует обновлённую связь, а не исходную.
+next=o; next.residual=0; next.peer_position=info.peer_update.position;
+next.peer_covariance=info.peer_update.covariance; next.peer_cross_cov=info.peer_update.cross_cov;
+next.R=1+next.peer_covariance(1,1); next.state_noise_cov=-next.peer_cross_cov(:,1);
+next.future_noise=info.future_noise_update;
+next.future_noise.measurement_cross_cov=-next.future_noise.peer_cross_cov(1,:).';
+[~,Q2,second]=nav_correct(updated,Q,next,100);
+h=[1 -1 0]; expected2=expected-(expected*h.')*(h*expected)/(1+h*expected*h.');
+actual2=[Q2(1,1),second.peer_update.cross_cov(1,1),second.future_noise_update.cross_cov(1); ...
+    second.peer_update.cross_cov(1,1),second.peer_update.covariance(1,1),second.future_noise_update.peer_cross_cov(1); ...
+    second.future_noise_update.cross_cov(1),second.future_noise_update.peer_cross_cov(1),second.future_noise_update.covariance];
+close(actual2,expected2,1e-12);
+scaled=o; scaled.future_noise.units={'micrometre'};
+scaled.future_noise.covariance=3e12; scaled.future_noise.cross_cov=Uf*1e6;
+scaled.future_noise.peer_cross_cov=future.peer_cross_cov*1e6;
+scaled.future_noise.measurement_cross_cov=future.measurement_cross_cov*1e6;
+[~,scaledP,scaledInfo]=nav_correct(state,P,scaled,100);
+close(scaledP,Q,1e-12);
+close(scaledInfo.future_noise_update.peer_cross_cov/1e6,info.future_noise_update.peer_cross_cov,1e-12);
+bad=o; bad.future_noise=rmfield(future,'peer_cross_cov');
+fails(@()nav_correct(state,P,bad,100),'libekf:Correlation');
+bad=o; bad.future_noise.peer_ids={'wrong_peer'};
+fails(@()nav_correct(state,P,bad,100),'libekf:Correlation');
+% Невозможная связь в направлении, не измеряемом дальностью, тоже отклоняется.
+bad=o; bad.future_noise.peer_cross_cov(2)=10;
+fails(@()nav_correct(state,P,bad,100),'libekf:Correlation');
+bad=o; bad.future_noise.peer_time=state.t-1;
+fails(@()nav_correct(state,P,bad,100),'libekf:Correlation');
+[same,sameP,rejected]=nav_correct(state,P,o,.01);
+assert(~rejected.accepted&&isequal(same,state)&&isequal(sameP,P)&&~isfield(rejected,'future_noise_update'));
+stored=info.future_noise_update;
+unchanged=nav_predict_noise(stored,Q,eye(21),zeros(21),state.t,zeros(21,1));
+close(unchanged.peer_cross_cov,stored.peer_cross_cov,0);
+fails(@()nav_predict_noise(stored,Q,eye(21),zeros(21),state.t+1,zeros(21,1)), ...
+    'libekf:Correlation');
 % Условные ошибки повторной калибровки готовятся из сохранённого набора автоматически.
 [s,e]=fixture; sensor=struct('id',s.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
 initial=struct('state',s,'P',eye(21),'used',{{}},'capacity',20);
