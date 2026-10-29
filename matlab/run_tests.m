@@ -2178,6 +2178,33 @@ first=u; first.t_end=s.t+.0625;
 [mid,midP]=nav_predict(s,f.P,first,e);
 second=u; second.t_start=mid.t;
 [plain,info]=nav_assimilate(f,u,[],e,1e8); assert(info.accepted);
+% LEKF-004/020: закрытие истории сохраняет оценку и освобождает только идентификаторы.
+seed=f; seed.used={'initial_record'}; seed.capacity=2; seed.excluded_sources={'failed_device'};
+checkpoint=nav_checkpoint(seed);
+assert(isempty(checkpoint.used)&&checkpoint.retired_through==s.t);
+preserved=rmfield(checkpoint,'retired_through'); preserved.used=seed.used;
+assert(isequal(preserved,seed));
+timed_imu=u; timed_imu.lineage_times=u.t_end;
+[closed_plain,accepted]=nav_assimilate(checkpoint,timed_imu,[],e,1e8);
+assert(accepted.accepted&&numel(closed_plain.used)==1);
+[unchanged,accepted]=nav_assimilate(checkpoint,u,[],e,1e8);
+assert(~accepted.accepted&&strcmp(accepted.reason,'libekf:LineageTime')&&isequal(unchanged,checkpoint));
+old_imu=timed_imu; old_imu.lineage_times=s.t;
+[unchanged,accepted]=nav_assimilate(checkpoint,old_imu,[],e,1e8);
+assert(~accepted.accepted&&strcmp(accepted.reason,'libekf:RetiredHistory')&&isequal(unchanged,checkpoint));
+% Повторные границы дают продолжать счисление при памяти всего на один новый отсчёт.
+bounded=checkpoint; bounded.capacity=1; unbounded=f;
+for step=1:12
+    next=timed_imu; next.t_start=bounded.state.t; next.t_end=next.t_start+.125;
+    next.t_received=next.t_end; next.lineage={sprintf('bounded_imu_%d',step)};
+    next.lineage_times=next.t_end;
+    [bounded,accepted]=nav_assimilate(bounded,next,[],e,1e8); assert(accepted.accepted);
+    [unbounded,accepted]=nav_assimilate(unbounded,next,[],e,1e8); assert(accepted.accepted);
+    bounded=nav_checkpoint(bounded);
+end
+close(bounded.P,unbounded.P,1e-12); close(bounded.state.p,unbounded.state.p,1e-12);
+assert(isempty(bounded.used)&&numel(unbounded.used)==12);
+
 required=fieldnames(u);
 for j=1:numel(required)
     incomplete=rmfield(u,required{j});
@@ -2238,6 +2265,17 @@ for k=1:numel(models)
     close(nav_rotation(replayed.state.q),nav_rotation(reference.state.q),1e-10);
     close(replayed.P,reference.P,1e-10);
     assert(replayed.state.t==u.t_end&&numel(replayed.used)==2);
+    % Каждая физическая модель сохраняет результат после закрытия старой истории.
+    dated=m; dated.lineage_times=m.t_measure;
+    [bounded_result,bounded_info]=nav_replay(checkpoint,{timed_imu},{dated},{sensor},e,1e8);
+    assert(bounded_info.accepted&&bounded_info.observations{1}.accepted&&numel(bounded_result.used)==2);
+    close(bounded_result.P,replayed.P,1e-12); close(bounded_result.state.p,replayed.state.p,1e-12);
+    % Новое имя вычисленного пакета не делает старые исходные данные новыми.
+    dated.source='derived'; dated.lineage={'old_input'}; dated.lineage_times=s.t;
+    [rejected,bounded_info]=nav_replay(checkpoint,{timed_imu},{dated},{sensor},e,1e8);
+    assert(bounded_info.accepted&&strcmp(bounded_info.observations{1}.reason,'libekf:RetiredHistory'));
+    assert(isequal(rejected,closed_plain));
+
     inertial_source=replayed.source_history(strcmp({replayed.source_history.id},u.source));
     measured_source=replayed.source_history(strcmp({replayed.source_history.id},m.source));
     assert(inertial_source.first_epoch==u.t_start&&inertial_source.last_epoch==u.t_end);
