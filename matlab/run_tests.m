@@ -963,6 +963,11 @@ control=struct('state_time',s.t,'frame_id',s.frame_id,'now',s.t, ...
     'checks',struct('altitude',{{good}}));
 out=nav_geodetic_output(s,eye(21),env,control);
 assert(strcmp(out.quality.altitude,'CONSISTENT')&&strcmp(out.quality.latitude,'NOT_READY'));
+control.invalidated_sources={'failed_sensor'};
+out=nav_geodetic_output(s,eye(21),env,control);
+assert(strcmp(out.quality.altitude,'ALARM'));
+control=rmfield(control,'invalidated_sources');
+
 % Полные окна проверки только для тревоги не подтверждают выходную величину.
 alarm_history=[];
 for t=s.t-6:s.t
@@ -3263,6 +3268,25 @@ assert(trace.accepted&&all(cellfun(@(x)x.accepted,trace.observations)));
 close(still_affected.state.p,contaminated.state.p,1e-12);
 close(still_affected.P,contaminated.P,1e-12);
 assert(any(strcmp({still_affected.source_history.id},'failed_position_sensor')));
+assert(isequal(still_affected.invalidated_sources,{'failed_position_sensor'}));
+restore=late_report; restore.valid=true; restore.lineage={'restore_failed_position_sensor'};
+[restored,accepted]=nav_assimilate(still_affected,restore,[],e,100);
+assert(accepted.accepted&&isempty(restored.excluded_sources)&& ...
+    isequal(restored.invalidated_sources,still_affected.invalidated_sources));
+closed=nav_checkpoint(restored);
+assert(isequal(closed.invalidated_sources,restored.invalidated_sources));
+control=struct('state_time',restored.state.t,'frame_id',restored.state.frame_id, ...
+    'now',restored.state.t,'checks',struct(),'invalidated_sources',{restored.invalidated_sources});
+published=nav_geodetic_output(restored.state,restored.P,e,control);
+assert(strcmp(published.quality.latitude,'ALARM')&&strcmp(published.quality.longitude,'ALARM')&& ...
+    strcmp(published.quality.altitude,'ALARM'));
+% До использования прибора полная история доказывает отсутствие его вклада.
+clean_initial=f; clean_initial.source_history=nav_sources([]); clean_initial.sources_complete=true;
+early_report=late_report; early_report.t_measure=f.state.t;
+[clean,accepted]=nav_replay(clean_initial,{u},{early_report,suspect},{[],sensor},e,1e8);
+assert(accepted.accepted&&~accepted.observations{2}.accepted&&~isfield(clean,'invalidated_sources'));
+close(clean.state.p,plain.state.p,1e-12); close(clean.P,plain.P,1e-12);
+
 % Отказ ИНС внутри интервала не допускает продолжения по тем же данным.
 report.target_source=u.source; report.t_measure=mid.t;
 [unchanged,info]=nav_assimilate_interval(f,u,{report},{[]},e,1e8);

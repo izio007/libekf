@@ -71,6 +71,10 @@ try
     inertial=strcmp(packet.model,'inertial');
     source_health=strcmp(packet.model,'source_health');
     health=strcmp(packet.model,'reference_health')||source_health;
+    invalidated={};
+    if isfield(filter,'invalidated_sources'), invalidated=filter.invalidated_sources; end
+    assert(iscell(invalidated)&&all(cellfun(@(x)ischar(x)&&isrow(x)&&~isempty(x),invalidated)), ...
+        'libekf:SourceHealth','Invalid unresolved source influence list.');
     excluded={};
     if isfield(filter,'excluded_sources'), excluded=filter.excluded_sources; end
     assert(iscell(excluded)&&all(cellfun(@(x)ischar(x)&&isrow(x)&&~isempty(x),excluded)), ...
@@ -139,6 +143,20 @@ try
             isscalar(packet.t_received)&&isreal(packet.t_received)&&isfinite(packet.t_received)&& ...
             packet.t_received>=packet.t_measure, 'libekf:PeerHealth','Invalid reference health report.');
         if source_health
+            if ~packet.valid
+                history=[]; complete=false;
+                if isfield(filter,'source_history'), history=nav_sources(filter.source_history); end
+                if isfield(filter,'sources_complete')
+                    assert(isfield(filter,'source_history')&&islogical(filter.sources_complete)&&isscalar(filter.sources_complete), ...
+                        'libekf:SourceHistory','Initial source-history completeness must be explicit.');
+                    complete=filter.sources_complete;
+                end
+                history=nav_sources(history);
+                assert(all([history.last_epoch]<=filter.state.t),'libekf:SourceHistory','Source history is newer than the state.');
+                if ~complete||any(strcmp({history.id},packet.target_source))
+                    invalidated=unique([invalidated(:);{packet.target_source}]);
+                end
+            end
             selected=strcmp(excluded,packet.target_source);
             if packet.valid
                 excluded(selected)=[];
@@ -352,6 +370,7 @@ try
     if health, result.reason='Признак исправности опоры обновлён'; end
     if source_health
         out.excluded_sources=excluded;
+        if ~isempty(invalidated), out.invalidated_sources=invalidated; end
         result.reason='Допуск источника обновлён по сообщению диагностики';
     end
 catch ex

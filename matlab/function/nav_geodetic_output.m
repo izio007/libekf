@@ -22,7 +22,7 @@ else
     J(1:2,:)=NaN; out.quality.latitude='CHART_SINGULAR'; out.quality.longitude='UNDEFINED';
 end
 out.covariance=J*P*J.'; out.jacobian=J;
-out.age=[]; out.sources=nav_sources([]); out.sources_complete=false;
+out.age=[]; out.sources=nav_sources([]); out.sources_complete=false; out.invalidated_sources={};
 % Проверки назначаются каждой выходной величине явно; согласие не означает VALID.
 if nargin>=4
     assert(isstruct(control)&&isscalar(control)&& ...
@@ -48,6 +48,16 @@ if nargin>=4
         assert(isfield(control,'source_history')&&islogical(control.sources_complete)&&isscalar(control.sources_complete), ...
             'libekf:SourceHistory','Source-history completeness must be explicit.');
         out.sources_complete=control.sources_complete;
+    end
+    if isfield(control,'invalidated_sources')
+        ids=control.invalidated_sources;
+        assert(iscell(ids)&&all(cellfun(@(x)ischar(x)&&isrow(x)&&~isempty(x),ids)), ...
+            'libekf:WatchOutput','Invalid unresolved source influence list.');
+        out.invalidated_sources=unique(ids(:));
+    end
+    if ~isempty(out.sources)&&isfield(out.sources,'excluded')
+        out.invalidated_sources=unique([out.invalidated_sources(:); ...
+            reshape({out.sources([out.sources.excluded]).id},[],1)]);
     end
     names={'latitude','longitude','altitude'};
     for k=1:numel(names)
@@ -77,6 +87,7 @@ if nargin>=4
             if alarm, status='ALARM'; elseif complete, status='CONSISTENT'; end
         end
         % Неопределённость долготы на полюсе нельзя снять согласованностью сторожа.
+        if ~isempty(out.invalidated_sources), status='ALARM'; end
         if strcmp(out.quality.(name),'UNASSESSED'), out.quality.(name)=status; end
     end
     if isfield(control,'geometry')
