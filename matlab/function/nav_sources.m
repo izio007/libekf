@@ -25,13 +25,22 @@ if nargin>=2
     end
     assert(isscalar(first)&&isscalar(last)&&isreal(first)&&isreal(last)&& ...
         isfinite(first)&&isfinite(last)&&first<=last,'libekf:SourceHistory','Invalid contribution epoch.');
-    index=find(strcmp({history.id},packet.source));
-    if isempty(index)
-        history(end+1)=struct('id',packet.source,'models',{{packet.model}},'first_epoch',first,'last_epoch',last);
-    else
-        history(index).models=unique([history(index).models(:);{packet.model}]);
-        history(index).first_epoch=min(history(index).first_epoch,first);
-        history(index).last_epoch=max(history(index).last_epoch,last);
+    contributors={packet.source};
+    if isfield(packet,'input_sources')
+        assert(iscell(packet.input_sources)&& ...
+            all(cellfun(@(x)ischar(x)&&isrow(x)&&~isempty(x),packet.input_sources)), ...
+            'libekf:SourceHistory','Invalid physical input source identities.');
+        contributors=unique([contributors(:);packet.input_sources(:)]);
+    end
+    for j=1:numel(contributors)
+        id=contributors{j}; index=find(strcmp({history.id},id));
+        if isempty(index)
+            history(end+1)=struct('id',id,'models',{{packet.model}},'first_epoch',first,'last_epoch',last);
+        else
+            history(index).models=unique([history(index).models(:);{packet.model}]);
+            history(index).first_epoch=min(history(index).first_epoch,first);
+            history(index).last_epoch=max(history(index).last_epoch,last);
+        end
     end
 end
 [~,order]=sort({history.id}); history=history(order);

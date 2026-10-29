@@ -112,6 +112,21 @@ for k=1:numel(models)
     control.excluded_sources={m.source}; control=rmfield(control,'sources_complete');
     published=nav_geodetic_output(a.state,a.P,e,control);
     assert(published.sources.excluded&&~published.sources_complete);
+    % Прибор не исчезает из происхождения оценки за именем вычислителя.
+    derived=m; derived.source='processor';
+    derived.input_sources={'physical_sensor','shared_clock','physical_sensor','processor'};
+    [tracked,accepted]=nav_assimilate(f,derived,sensor0,e,1e8);
+    assert(accepted.accepted&&isequal({tracked.source_history.id}, ...
+        {'physical_sensor','processor','shared_clock'}));
+    assert(all([tracked.source_history.first_epoch]==s.t)&&all([tracked.source_history.last_epoch]==s.t));
+    closed=nav_checkpoint(tracked);
+    assert(isequal(closed.source_history,tracked.source_history));
+    control.source_history=tracked.source_history; control.excluded_sources={'physical_sensor'};
+    published=nav_geodetic_output(tracked.state,tracked.P,e,control);
+    assert(isequal({published.sources([published.sources.excluded]).id},{'physical_sensor'}));
+    failed_packet=derived; failed_packet.quality='FAILED';
+    [unchanged,failed]=nav_assimilate(f,failed_packet,sensor0,e,1e8);
+    assert(~failed.accepted&&isequal(unchanged,f));
     future=f; future.source_history=a.source_history; future.source_history.last_epoch=s.t+1;
     [unchanged,failed]=nav_assimilate(future,m,sensor0,e,1e8);
     assert(~failed.accepted&&strcmp(failed.reason,'libekf:SourceHistory')&&isequal(unchanged,future));
@@ -2929,6 +2944,27 @@ for k=1:numel(models)
     [unchanged,info]=nav_assimilate(at_measurement,invalid,sensor,e,1e8);
     assert(~info.accepted&&isequal(unchanged,at_measurement));
 end
+% Пересчёт от прежнего снимка исключает также производное измерение отказавшего прибора.
+suspect=packet(mid,'external_position'); suspect.frame='SENSOR_LOCAL';
+suspect.source='position_processor'; suspect.input_sources={'failed_position_sensor'};
+suspect.z=suspect.z+[25;0;0];
+[contaminated,trace]=nav_replay(f,{u},{suspect},{sensor},e,1e8);
+assert(trace.accepted&&trace.observations{1}.accepted&& ...
+    any(strcmp({contaminated.source_history.id},'failed_position_sensor')));
+assert(norm(contaminated.state.p-plain.state.p)>1);
+clean_start=f; clean_start.excluded_sources={'failed_position_sensor'};
+[recovered,trace]=nav_replay(clean_start,{u},{suspect},{sensor},e,1e8);
+assert(trace.accepted&&~trace.observations{1}.accepted&& ...
+    ~any(strcmp({recovered.source_history.id},'failed_position_sensor')));
+close(recovered.state.p,plain.state.p,1e-12); close(recovered.P,plain.P,1e-12);
+% Запрет в конце истории не отменяет уже принятую поправку.
+late_report=report; late_report.target_source='failed_position_sensor';
+late_report.t_measure=u.t_end; late_report.t_received=u.t_end;
+[still_affected,trace]=nav_replay(f,{u},{suspect,late_report},{sensor,[]},e,1e8);
+assert(trace.accepted&&all(cellfun(@(x)x.accepted,trace.observations)));
+close(still_affected.state.p,contaminated.state.p,1e-12);
+close(still_affected.P,contaminated.P,1e-12);
+assert(any(strcmp({still_affected.source_history.id},'failed_position_sensor')));
 % Отказ ИНС внутри интервала не допускает продолжения по тем же данным.
 report.target_source=u.source; report.t_measure=mid.t;
 [unchanged,info]=nav_assimilate_interval(f,u,{report},{[]},e,1e8);
