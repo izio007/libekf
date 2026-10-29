@@ -1098,6 +1098,39 @@ actual2=[Q2(1,1),second.peer_update.cross_cov(1,1),second.future_noise_update.cr
     second.peer_update.cross_cov(1,1),second.peer_update.covariance(1,1),second.future_noise_update.peer_cross_cov(1); ...
     second.future_noise_update.cross_cov(1),second.future_noise_update.peer_cross_cov(1),second.future_noise_update.covariance];
 close(actual2,expected2,1e-12);
+% Смена начала и осей сохраняет следующую совместную поправку.
+snapshot=struct('state',updated,'P',Q,'used',{{}},'capacity',10, ...
+    'reference_bank',info.peer_update,'future_noise',info.future_noise_update);
+snapshot.reference_bank.valid=true;
+to=environment; to.frame_id='joint_reference_frame';
+to.C_e_l=environment.C_e_l*nav_rotation([cos(.3);0;0;sin(.3)]);
+to.origin_ecef=environment.origin_ecef+environment.C_e_l*[200;-100;50];
+[converted,~,Jframe]=nav_change_frame(snapshot,[],environment,to);
+Kframe=to.C_e_l.'*environment.C_e_l;
+close(converted.future_noise.peer_cross_cov,Kframe*info.future_noise_update.peer_cross_cov,1e-12);
+transformed=next; transformed.frame_id=to.frame_id; transformed.H=next.H*Jframe.';
+transformed.state_noise_cov=Jframe*next.state_noise_cov;
+transformed.peer_position=converted.reference_bank.position;
+transformed.peer_covariance=converted.reference_bank.covariance;
+transformed.peer_cross_cov=converted.reference_bank.cross_cov;
+transformed.peer_jacobian=next.peer_jacobian*Kframe.';
+transformed.future_noise=converted.future_noise;
+transformed.future_noise.measurement_cross_cov=next.future_noise.measurement_cross_cov;
+[~,changedP,changed]=nav_correct(converted.state,converted.P,transformed,100);
+close(changedP,Jframe*Q2*Jframe.',1e-12);
+close(changed.peer_update.covariance,Kframe*second.peer_update.covariance*Kframe.',1e-12);
+close(changed.future_noise_update.cross_cov,Jframe*second.future_noise_update.cross_cov,1e-12);
+close(changed.future_noise_update.peer_cross_cov,Kframe*second.future_noise_update.peer_cross_cov,1e-12);
+roundtrip=nav_change_frame(converted,[],to,environment);
+close(roundtrip.future_noise.peer_cross_cov,snapshot.future_noise.peer_cross_cov,1e-12);
+close(roundtrip.reference_bank.position,snapshot.reference_bank.position,1e-8);
+invalid=snapshot; invalid.future_noise.peer_ids={'other'};
+fails(@()nav_change_frame(invalid,[],environment,to),'libekf:Correlation');
+invalid=snapshot; invalid.future_noise.peer_cross_cov(2)=10;
+fails(@()nav_change_frame(invalid,[],environment,to),'libekf:Correlation');
+invalid=rmfield(snapshot,'reference_bank');
+fails(@()nav_change_frame(invalid,[],environment,to),'libekf:Correlation');
+
 scaled=o; scaled.future_noise.units={'micrometre'};
 scaled.future_noise.covariance=3e12; scaled.future_noise.cross_cov=Uf*1e6;
 scaled.future_noise.peer_cross_cov=future.peer_cross_cov*1e6;
