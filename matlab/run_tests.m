@@ -2385,6 +2385,47 @@ end
 end
 
 function requirement_timed_rays
+% Подготовка движения из ИНС сохраняет зависимость от навигационного состояния.
+[first,environment]=fixture; first.v=zeros(3,1); first.q=[1;0;0;0];
+second=first; second.t=first.t+.2;
+environment.Omega=[0;0;7.292115e-5]; environment.gravity_origin=[0;0;-9.81];
+environment.gravity_gradient=zeros(3); environment.gravity_radius=1e6;
+raw=struct('accel',[first.ba+[0;0;9.81],second.ba+[0;0;9.81]], ...
+    'gyro',[first.bg+environment.Omega,second.bg+environment.Omega], ...
+    'epochs',[first.t second.t],'t_received',second.t,'quality','VALID','calibration_valid',true, ...
+    'frame','BODY','accel_unit','m/s^2','gyro_unit','rad/s','source','imu', ...
+    'lineage',{{'imu_at_first','imu_at_second'}},'lineage_times',[first.t second.t], ...
+    'covariance',eye(12)*1e-4,'state_noise_cov',zeros(42,12),'state_noise_frame_id',first.frame_id);
+P=eye(42)*1e-3; validity=struct('max_offset',.02,'min_baseline',.01);
+prepared=nav_inertial_camera_motion({first,second},P,raw,environment,validity);
+close(prepared.motion.acceleration,zeros(3,2),1e-12);
+close(prepared.motion.body_rates,[first.bg second.bg],1e-12);
+assert(norm(prepared.state_noise_cov,'fro')>0&&strcmp(prepared.noise_model,'joint_required'));
+% Численные производные номинально подготовленного входа имеют обратный знак:
+% ошибка входа определяется как подготовленное значение минус истинное.
+for j=1:42
+    d=zeros(21,1); index=mod(j-1,21)+1; d(index)=1e-6;
+    plus={first,second}; minus=plus; state_index=1+(j>21);
+    plus{state_index}=nav_apply_error(plus{state_index},d);
+    minus{state_index}=nav_apply_error(minus{state_index},-d);
+    op=nav_inertial_camera_motion(plus,P,raw,environment,validity);
+    om=nav_inertial_camera_motion(minus,P,raw,environment,validity);
+    value_p=[op.motion.body_rates(:);op.motion.acceleration(:)];
+    value_m=[om.motion.body_rates(:);om.motion.acceleration(:)];
+    close((value_p-value_m)/(2e-6),-prepared.state_transform(:,j),1e-8);
+end
+% Полная зависимость исходных ошибок сохраняется, а невозможная отклоняется.
+raw.state_noise_cov(1,1)=1e-5;
+dependent=nav_inertial_camera_motion({first,second},P,raw,environment,validity);
+T=[dependent.state_transform dependent.input_transform]; joint=[P raw.state_noise_cov;raw.state_noise_cov.' raw.covariance];
+close(dependent.covariance,T*joint*T.',1e-12);
+close(dependent.state_noise_cov,joint(1:42,:)*T.',1e-12);
+bad=raw; bad.state_noise_cov(1,1)=1;
+fails(@()nav_inertial_camera_motion({first,second},P,bad,environment,validity),'libekf:Covariance');
+bad=raw; bad.accel_unit='g';
+fails(@()nav_inertial_camera_motion({first,second},P,bad,environment,validity),'libekf:Units');
+bad=raw; bad.quality='FAILED';
+fails(@()nav_inertial_camera_motion({first,second},P,bad,environment,validity),'libekf:Quality');
 [a,e]=fixture; a.p=zeros(3,1); a.q=[1;0;0;0]; a.bg=zeros(3,1); a.v=[2;1;.1];
 b=a; b.t=a.t+.2; b.p=[.5;.1;.02]; b.v=[3;-.4;.2]; b.q=[cos(.04);0;sin(.04);0];
 rates=[.1 -.2;.2 .1;0 .05]; K=[250 0 160;0 260 120;0 0 1];
@@ -2508,6 +2549,30 @@ assert(moving_info.accepted);
 moving_after=nav_odometry_measurement(moving_result.reference,moving_result.state,moving);
 assert(norm(moving_after.residual)<norm(moving_before.residual)&&trace(moving_result.jointP)<trace(filter.jointP));
 
+% Сквозной путь от отдельных новых инерциальных отсчётов до поправки по камере.
+camera_env=e; camera_env.Omega=zeros(3,1); camera_env.gravity_origin=zeros(3,1);
+camera_env.gravity_gradient=zeros(3); camera_env.gravity_radius=1e6;
+camera_raw=raw; camera_raw.accel=[nav_rotation(a.q).'*acceleration(:,1)+a.ba, ...
+    nav_rotation(prior.q).'*acceleration(:,2)+prior.ba];
+camera_raw.gyro=rates; camera_raw.epochs=[a.t prior.t]; camera_raw.t_received=prior.t;
+camera_raw.lineage_times=camera_raw.epochs; camera_raw.state_noise_frame_id=a.frame_id;
+camera_raw.state_noise_cov=zeros(42,12);
+prepared_motion=nav_inertial_camera_motion({a,prior},filter.jointP,camera_raw,camera_env,validity);
+prepared_packet=accelerated; prepared_packet.row_motion=prepared_motion.motion;
+prepared_packet.R=blkdiag(accelerated.R(1:6*n,1:6*n),prepared_motion.covariance);
+prepared_packet.state_noise_cov=[zeros(42,6*n) prepared_motion.state_noise_cov];
+prepared_packet.state_noise_frame_id=a.frame_id; prepared_packet.noise_model='joint_required';
+prepared_packet.lineage=[accelerated.lineage(:);prepared_motion.lineage(:)];
+prepared_packet.input_sources=prepared_motion.input_sources;
+prepared_before=nav_odometry_measurement(a,prior,prepared_packet);
+[prepared_result,prepared_info]=nav_assimilate(filter,prepared_packet,[],camera_env,1000);
+assert(prepared_info.accepted);
+prepared_after=nav_odometry_measurement(prepared_result.reference,prepared_result.state,prepared_packet);
+assert(norm(prepared_after.residual)<norm(prepared_before.residual));
+% Повторно использованные инерциальные отсчёты не скрываются внутри камеры.
+already=filter; already.used=prepared_motion.lineage;
+[unchanged,rejected]=nav_assimilate(already,prepared_packet,[],camera_env,1000);
+assert(~rejected.accepted&&isequal(unchanged,already));
 before=nav_odometry_measurement(a,prior,m);
 [updated,info]=nav_assimilate(filter,m,[],e,1000); assert(info.accepted);
 after=nav_odometry_measurement(updated.reference,updated.state,m);
