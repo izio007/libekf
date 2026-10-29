@@ -57,6 +57,20 @@ for k=1:numel(models)
     [same_state,same_P,correction]=nav_correct(f.state,f.P,ra.observation,1e8);
     close(same_state.p,a.state.p,1e-12); close(same_P,a.P,1e-12);
     close(correction.error_reset,ra.error_reset,1e-12);
+    % Определимость из принятой модели совпадает с отдельным расчётом без априорной P.
+    history=struct('steps',{{struct('kind',m.model,'time',s.t,'data',ra)}}, ...
+        'initial_times',s.t,'frame_id',s.frame_id,'noise_independent',true);
+    if isfield(ra.observation,'peer_covariance')||~strcmp(ra.observation.noise_model,'independent')
+        fails(@()nav_observability_sequence(history,ones(21,1),eye(21),1e-10),'libekf:Correlation');
+    else
+        geometry=nav_observability_sequence(history,ones(21,1),eye(21),1e-10);
+        expected_geometry=nav_observability(model.H,model.R,ones(21,1),ra.error_reset,1e-10);
+        assert(isequal(geometry.identified,expected_geometry.identified));
+        known=geometry.identified;
+        if any(known), close(geometry.variance(known),expected_geometry.variance(known),1e-8); end
+        assert(all(isinf(geometry.variance(~known))));
+    end
+
     bad=m; bad.quality='FAILED';
     [unchanged,failed]=nav_assimilate(f,bad,sensor0,e,1e8);
     assert(~failed.accepted&&isequal(unchanged,f)&&~isfield(failed,'observation'));
@@ -2257,6 +2271,49 @@ assert(~ismember('satellite_10',f.used));
 end
 
 function requirement_observable_quantities
+% Полный путь: ИНС, три положения, смена опоры, определимость и географический выход.
+[s,e]=fixture; s.p=zeros(3,1); s.v=[2;0;0]; s.q=[1;0;0;0];
+s.ba=zeros(3,1); s.bg=zeros(3,1); e.Omega=zeros(3,1);
+e.gravity_origin=zeros(3,1); e.gravity_gradient=zeros(3); e.gravity_radius=1e5;
+e.max_step=1; e.state_noise_density=zeros(21);
+imu=struct('model','inertial','source','imu','lineage',{{'history_imu_1'}},'quality','VALID', ...
+    'frame','BODY','accel_unit','m/s^2','gyro_unit','rad/s','t_start',s.t, ...
+    't_end',s.t+1,'t_received',s.t+1,'accel',zeros(3,1),'gyro',zeros(3,1),'noise_density',zeros(6));
+second=imu; second.t_start=s.t+1; second.t_end=s.t+2; second.t_received=s.t+2;
+second.lineage={'history_imu_2'};
+filter=struct('state',s,'P',eye(21),'used',{{}},'capacity',20);
+sensor=struct('id',s.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
+packets=cell(1,3);
+for j=1:3
+    truth=s; truth.t=s.t+j-1; truth.p=s.p+s.v*(j-1);
+    packets{j}=packet(truth,'gnss_position'); packets{j}.frame='SENSOR_LOCAL';
+    packets{j}.lever=zeros(3,1); packets{j}.z=truth.p; packets{j}.R=eye(3);
+    packets{j}.lineage={sprintf('history_position_%d',j)};
+end
+save=struct('model','save_reference','t_measure',s.t+1);
+[state,trace]=nav_replay(filter,{imu,second},{packets{1},packets{2},save,packets{3}}, ...
+    {sensor,sensor,[],sensor},e,100);
+assert(trace.accepted&&all(cellfun(@(z)z.accepted,trace.observations)));
+compiled=struct('steps',{trace.steps},'initial_times',s.t,'frame_id',s.frame_id, ...
+    'noise_independent',true,'current_only',true);
+target=zeros(6,21); target(:,1:6)=eye(6);
+geometry=nav_observability_sequence(compiled,ones(21,1),target,1e-10);
+assert(all(geometry.identified)&&geometry.t==s.t+2);
+close(geometry.variance,[ones(3,1);6.5*ones(3,1)],1e-10);
+control=struct('state_time',state.state.t,'frame_id',s.frame_id,'now',state.state.t,'checks',struct());
+control.geometry=struct('history',compiled,'scales',ones(21,1), ...
+    'relative_tolerance',1e-10,'max_variance',[1;1;10]);
+published=nav_geodetic_output(state.state,state.P,e,control);
+assert(all(published.observable)); close(published.measurement_variance(3),1,1e-9);
+unknown=compiled; unknown.noise_independent=false;
+fails(@()nav_observability_sequence(unknown,ones(21,1),target,1e-10),'libekf:Correlation');
+gap=compiled; first=find(cellfun(@(z)strcmp(z.kind,'propagation'),gap.steps),1);
+gap.steps{first}.data.t_start=gap.steps{first}.data.t_start+.01;
+fails(@()nav_observability_sequence(gap,ones(21,1),target,1e-10),'libekf:History');
+rejected=compiled; first=find(cellfun(@(z)isfield(z.data,'observation'),rejected.steps),1);
+rejected.steps{first}.data.accepted=false;
+fails(@()nav_observability_sequence(rejected,ones(21,1),target,1e-10),'libekf:History');
+
 % Сохранение копии не создаёт измерительной информации, даже в тот же момент.
 clone=struct('H',{{1,zeros(0,2)}},'transitions',{{[1;1]}},'times',[0 0], ...
     'process_covariance',zeros(2),'measurement_covariance',9, ...
