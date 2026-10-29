@@ -74,22 +74,47 @@ switch m.model
             h=va; H=Jv; units=repmat({'m/s'},3,1);
         end
     case 'cooperative_range'
+        peer_indices=1:3;
+        if isfield(m,'reference_bank')
+            b=m.reference_bank;
+            assert(isstruct(b)&&isscalar(b)&&all(isfield(b, ...
+                {'ids','position','covariance','cross_cov','frame_id','t','valid'}))&& ...
+                isfield(m,'peer_id')&&ischar(m.peer_id), ...
+                'libekf:Peer','Incomplete reference set or selected ID.');
+            assert(iscell(b.ids)&&~isempty(b.ids)&& ...
+                all(cellfun(@(x)ischar(x)&&~isempty(x),b.ids))&& ...
+                numel(unique(b.ids))==numel(b.ids)&& ...
+                isequal(size(b.position),[3*numel(b.ids) 1])&&isreal(b.position)&&all(isfinite(b.position))&& ...
+                islogical(b.valid)&&numel(b.valid)==numel(b.ids)&&strcmp(b.frame_id,s.frame_id), ...
+                'libekf:Peer','Invalid reference identities, geometry or frame.');
+            selected=find(strcmp(b.ids,m.peer_id));
+            assert(numel(selected)==1,'libekf:Peer','Unknown reference ID.');
+            assert(~any(isfield(m,{'station','peer_covariance','peer_cross_cov','peer_time','peer_valid','peer_cross_frame_id'})), ...
+                'libekf:Peer','Do not specify a reference twice.');
+            peer_indices=3*(selected-1)+(1:3);
+            m.station=b.position(peer_indices); m.peer_covariance=b.covariance;
+            m.peer_cross_cov=b.cross_cov; m.peer_cross_frame_id=b.frame_id;
+            m.peer_time=b.t; m.peer_valid=b.valid(selected); peer_position=b.position;
+        else
+            require_fields(m,{'station'}); peer_position=m.station(:);
+        end
         require_fields(m,{'station','peer_covariance','peer_cross_cov','peer_cross_frame_id','peer_time','peer_valid'});
         assert(isequal(m.peer_valid,true)&&isscalar(m.peer_time)&&m.peer_time==s.t, ...
             'libekf:Peer','Peer position must be valid at measurement epoch.');
         assert(~isfield(m,'state_noise_cov'),'libekf:Correlation','Specify peer dependence only once.');
-        V=m.peer_covariance; U=m.peer_cross_cov;
-        assert(isequal(size(V),[3 3])&&all(isfinite(V(:)))&& ...
+        V=m.peer_covariance; U=m.peer_cross_cov; d=numel(peer_position);
+        assert(isequal(size(V),[d d])&&all(isfinite(V(:)))&& ...
             norm(V-V.','fro')<=1e-12*max(norm(V,'fro'),realmin)&& ...
             min(eig((V+V.')/2))>=0,'libekf:Covariance','Invalid peer covariance.');
-        assert(any(size(U,1)==[21 42])&&size(U,2)==3&&all(isfinite(U(:)))&& ...
+        assert(any(size(U,1)==[21 42])&&size(U,2)==d&&all(isfinite(U(:)))&& ...
             strcmp(m.peer_cross_frame_id,s.frame_id), ...
             'libekf:Correlation','Invalid common-state/peer covariance.');
         delta=ps-vector3(m.station); distance=norm(delta);
         assert(distance>0,'libekf:Geometry','Undefined peer range.');
         direction=delta/distance; h=distance; H=direction.'*Jp; units={'m'};
-        added_variance=direction.'*V*direction;
-        derived_cross=-U*direction;
+        peer_jacobian=zeros(1,d); peer_jacobian(peer_indices)=-direction.';
+        added_variance=peer_jacobian*V*peer_jacobian.';
+        derived_cross=U*peer_jacobian.';
     case {'dme_range','pseudorange'}
         require_fields(m,{'station'});
         d=ps-vector3(m.station); rho=norm(d);
@@ -361,9 +386,10 @@ if ~isempty(derived_cross)
     obs.state_noise_cov=derived_cross;
     obs.peer_covariance=m.peer_covariance;
     obs.peer_cross_cov=m.peer_cross_cov;
-    obs.peer_jacobian=-direction.';
+    obs.peer_jacobian=peer_jacobian;
     obs.peer_noise_cov=m.R;
-    obs.peer_position=m.station(:);
+    obs.peer_position=peer_position;
+    if isfield(m,'reference_bank'), obs.peer_ids=m.reference_bank.ids; end
     obs.peer_time=m.peer_time;
 end
 if isfield(m,'state_noise_cov')

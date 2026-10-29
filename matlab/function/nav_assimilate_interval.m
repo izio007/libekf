@@ -18,6 +18,9 @@ assert(isfield(imu,'model')&&strcmp(imu.model,'inertial'), ...
 [whole,check]=nav_assimilate(filter,imu,[],env,limit,args{:});
 if ~check.accepted, result.reason=check.reason; return; end
 if isempty(packets), out=whole; result.accepted=true; result.reason=check.reason; return; end
+if isfield(filter,'reference_bank')&&~isfield(imu.reference_motion,'F')
+    result.reason='libekf:ReferenceInterval'; return;
+end
 candidate=filter; candidate.used=whole.used; % Исходные данные ИНС учитываются ровно один раз.
 n=numel(packets); epochs=Inf(1,n); checks=cell(size(packets));
 for k=1:n
@@ -71,5 +74,10 @@ part=imu; part.t_start=in.state.t; part.t_end=t;
 if isfield(in,'reference')
     cross=in.jointP(1:21,22:42)*T.';
     out.jointP=[in.jointP(1:21,1:21) cross;cross.' out.P];
+end
+if isfield(in,'reference_bank')
+    motion=imu.reference_motion; motion.t_start=in.state.t; motion.t_end=t;
+    transition=T; if isfield(in,'reference'), transition=blkdiag(eye(21),T); end
+    out.reference_bank=nav_predict_reference(in.reference_bank,transition,motion);
 end
 end

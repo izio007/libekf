@@ -15,4 +15,9 @@ nav_rotation(filter.state.q);
 assert(iscell(filter.used)&&all(cellfun(@(x)ischar(x)&&~isempty(x),filter.used)), ...
     'libekf:Lineage','Invalid source history.');
 out=filter; out.reference=filter.state; out.jointP=[P P;P P];
+if isfield(filter,'reference_bank')
+    cross=filter.reference_bank.cross_cov;
+    assert(any(size(cross,1)==[21 42]),'libekf:Correlation','Invalid reference-set dependence.');
+    cross=cross(end-20:end,:); out.reference_bank.cross_cov=[cross;cross];
+end
 end

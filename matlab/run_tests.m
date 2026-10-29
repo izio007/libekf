@@ -891,6 +891,205 @@ fails(@()nav_predict_reference(retained,transition,bad_motion),'libekf:Covarianc
 bad_motion=motion; bad_motion.t_start=retained.t-1;
 fails(@()nav_predict_reference(retained,transition,bad_motion),'libekf:Epoch');
 
+% Several references acquire mutual dependence through the shared navigation state.
+bank=struct('position',[s.p-[10;0;0];s.p+[20;0;0]], ...
+    'covariance',diag([9 1 1 4 1 1]),'cross_cov',zeros(21,6), ...
+    'frame_id',s.frame_id,'t',s.t,'noise_independent',true);
+bank.cross_cov(1,[1 4])=[1 2]; bankP=eye(21); bankP(1,1)=4;
+[~,~,bank_info]=nav_correct(s,bankP,position_obs,100,bank);
+assert(bank_info.accepted);
+close(bank_info.peer_update.position,bank.position+[.2;0;0;.4;0;0],1e-12);
+close(bank_info.peer_update.covariance([1 4],[1 4]),[8.8 -.4;-.4 3.2],1e-12);
+close(bank_info.peer_update.cross_cov(1,[1 4]),[.2 .4],1e-12);
+motion=struct('A',eye(6),'shift',zeros(6,1),'Q',zeros(6), ...
+    't_start',s.t,'t_end',s.t+1,'frame_id',s.frame_id,'noise_independent',true);
+next_bank=nav_predict_reference(bank_info.peer_update,eye(21),motion);
+close(next_bank.covariance,bank_info.peer_update.covariance,0);
+close(next_bank.cross_cov,bank_info.peer_update.cross_cov,0);
+% Reordering references must reorder all associated covariance blocks together.
+order=[4:6 1:3]; swapped=bank;
+swapped.position=bank.position(order); swapped.covariance=bank.covariance(order,order);
+swapped.cross_cov=bank.cross_cov(:,order);
+[~,~,swapped_info]=nav_correct(s,bankP,position_obs,100,swapped);
+close(swapped_info.peer_update.position,bank_info.peer_update.position(order),1e-12);
+close(swapped_info.peer_update.covariance,bank_info.peer_update.covariance(order,order),1e-12);
+
+% A range selects its reference by ID and updates the complete correlated set.
+bank.ids={'left','right'}; bank.valid=[true true];
+m=packet(s,'cooperative_range'); m.lever=zeros(3,1); m.z=11; m.R=1;
+m=rmfield(m,{'station','peer_covariance','peer_cross_cov','peer_time','peer_valid','peer_cross_frame_id'});
+m.reference_bank=bank; m.peer_id='left'; m.noise_model='joint_required';
+o=nav_measurement(s,m,e); [ranged,rangeP,range_info]=nav_correct(s,bankP,o,100);
+assert(range_info.accepted&&isequal(range_info.peer_update.ids,bank.ids));
+close(ranged.p,s.p+[.25;0;0],1e-12); close(rangeP(1,1),13/4,1e-12);
+close(range_info.peer_update.position,bank.position+[-2/3;0;0;1/6;0;0],1e-12);
+close(range_info.peer_update.covariance(1,4),4/3,1e-12);
+bad=m; bad.peer_id='missing'; fails(@()nav_measurement(s,bad,e),'libekf:Peer');
+bad=m; bad.reference_bank.ids={'left','left'}; fails(@()nav_measurement(s,bad,e),'libekf:Peer');
+bad=m; bad.reference_bank.valid(1)=false; fails(@()nav_measurement(s,bad,e),'libekf:Peer');
+permuted=m; permuted.reference_bank.ids=bank.ids([2 1]);
+permuted.reference_bank.position=bank.position(order);
+permuted.reference_bank.covariance=bank.covariance(order,order);
+permuted.reference_bank.cross_cov=bank.cross_cov(:,order);
+o=nav_measurement(s,permuted,e); [same,sameP,permuted_info]=nav_correct(s,bankP,o,100);
+close(same.p,ranged.p,1e-12); close(sameP,rangeP,1e-12);
+close(permuted_info.peer_update.position,range_info.peer_update.position(order),1e-12);
+
+% A stored set is updated atomically along with the navigation state.
+sensor=struct('id',s.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
+filter=struct('state',s,'P',bankP,'used',{{}},'capacity',10,'reference_bank',bank);
+managed=m; managed=rmfield(managed,'reference_bank'); managed.frame='SENSOR_LOCAL';
+[after_range,accepted]=nav_assimilate(filter,managed,sensor,e,100);
+assert(accepted.accepted); close(after_range.state.p,ranged.p,1e-12);
+close(after_range.reference_bank.position,range_info.peer_update.position,1e-12);
+close(after_range.reference_bank.covariance,range_info.peer_update.covariance,1e-12);
+assert(isequal(after_range.reference_bank.valid,bank.valid));
+position=packet(after_range.state,'gnss_position'); position.lever=zeros(3,1);
+position.frame='SENSOR_LOCAL'; position.reference_noise_independent=true;
+prepared=after_range.reference_bank; prepared.noise_independent=true;
+o=nav_observe_source(after_range.state,position,sensor,e);
+[expected,expectedP,expected_info]=nav_correct(after_range.state,after_range.P,o,100,prepared);
+[after_position,accepted]=nav_assimilate(after_range,position,sensor,e,100);
+assert(accepted.accepted); close(after_position.state.p,expected.p,1e-12); close(after_position.P,expectedP,1e-12);
+close(after_position.reference_bank.cross_cov,expected_info.peer_update.cross_cov,1e-12);
+position.reference_noise_independent=false;
+[same,rejected]=nav_assimilate(after_range,position,sensor,e,100);
+assert(~rejected.accepted&&isequal(same,after_range));
+cloned=nav_save_reference(after_range);
+close(cloned.reference_bank.cross_cov,[after_range.reference_bank.cross_cov;after_range.reference_bank.cross_cov],0);
+
+% Inertial propagation carries the stored set; an absent motion model is rejected.
+motion_env=e; motion_env.Omega=zeros(3,1); motion_env.gravity_origin=zeros(3,1);
+motion_env.gravity_gradient=zeros(3); motion_env.gravity_radius=1e5;
+motion_env.max_step=.1; motion_env.state_noise_density=eye(21)*1e-8;
+imu=struct('model','inertial','source','imu','lineage',{{'bank_motion'}},'quality','VALID', ...
+    'frame','BODY','accel_unit','m/s^2','gyro_unit','rad/s','t_start',s.t,'t_end',s.t+.1, ...
+    't_received',s.t+.1,'accel',zeros(3,1),'gyro',zeros(3,1),'noise_density',eye(6)*1e-8);
+[same,rejected]=nav_assimilate(after_range,imu,[],motion_env,100);
+assert(~rejected.accepted&&isequal(same,after_range));
+imu.reference_motion=struct('A',eye(6),'shift',zeros(6,1),'Q',zeros(6), ...
+    't_start',s.t,'t_end',s.t+.1,'frame_id',s.frame_id,'noise_independent',true);
+% An impossible stored dependence must not pass an inertial-only step.
+broken_filter=after_range; broken_filter.reference_bank.cross_cov(1,1)=1e6;
+[unchanged,bad_result]=nav_assimilate(broken_filter,imu,[],motion_env,100);
+assert(~bad_result.accepted&&strcmp(bad_result.reason,'libekf:Correlation')&&isequal(unchanged,broken_filter));
+broken_filter=after_range; broken_filter.reference_bank.ids={'left','left'};
+[unchanged,bad_result]=nav_assimilate(broken_filter,imu,[],motion_env,100);
+assert(~bad_result.accepted&&strcmp(bad_result.reason,'libekf:Peer')&&isequal(unchanged,broken_filter));
+[~,~,transition]=nav_predict(after_range.state,after_range.P,imu,motion_env);
+[moved,accepted]=nav_assimilate(after_range,imu,[],motion_env,100);
+assert(accepted.accepted&&moved.reference_bank.t==moved.state.t);
+close(moved.reference_bank.position,after_range.reference_bank.position,0);
+close(moved.reference_bank.covariance,after_range.reference_bank.covariance,0);
+close(moved.reference_bank.cross_cov,transition*after_range.reference_bank.cross_cov,1e-12);
+[same,rejected]=nav_assimilate_interval(after_range,imu,{position},{sensor},motion_env,100);
+assert(~rejected.accepted&&strcmp(rejected.reason,'libekf:ReferenceInterval')&&isequal(same,after_range));
+
+% Continuous reference dynamics compose across arbitrary observation epochs.
+continuous=struct('F',zeros(6),'drift',[2;0;0;0;0;0],'noise_density',eye(6)*.5, ...
+    't_start',s.t,'t_end',s.t+2,'frame_id',s.frame_id,'noise_independent',true);
+full=nav_predict_reference(bank,eye(21),continuous);
+close(full.position,bank.position+[4;0;0;0;0;0],1e-12);
+close(full.covariance,bank.covariance+eye(6),1e-12);
+continuous.F(1,1)=.1;
+full=nav_predict_reference(bank,eye(21),continuous);
+part=continuous; part.t_end=s.t+.7; left=nav_predict_reference(bank,eye(21),part);
+part.t_start=part.t_end; part.t_end=continuous.t_end;
+split=nav_predict_reference(left,eye(21),part);
+close(split.position,full.position,1e-10); close(split.covariance,full.covariance,1e-10);
+close(split.cross_cov,full.cross_cov,1e-10);
+imu.reference_motion=continuous; imu.reference_motion.t_end=imu.t_end;
+first=imu; first.t_end=s.t+.05; first.reference_motion.t_end=first.t_end; first.lineage={'manual_first'};
+[mid,ok]=nav_assimilate(after_range,first,[],motion_env,100); assert(ok.accepted);
+measurement=packet(mid.state,'gnss_position'); measurement.frame='SENSOR_LOCAL';
+measurement.lever=zeros(3,1); measurement.reference_noise_independent=true; measurement.t_received=imu.t_end;
+[manual,ok]=nav_assimilate(mid,measurement,sensor,motion_env,100); assert(ok.accepted);
+last=imu; last.t_start=first.t_end; last.reference_motion.t_start=last.t_start; last.lineage={'manual_last'};
+[manual,ok]=nav_assimilate(manual,last,[],motion_env,100); assert(ok.accepted);
+[automatic,ok]=nav_assimilate_interval(after_range,imu,{measurement},{sensor},motion_env,100);
+assert(ok.accepted&&ok.observations{1}.accepted);
+close(automatic.state.p,manual.state.p,1e-10); close(automatic.P,manual.P,1e-10);
+close(automatic.reference_bank.position,manual.reference_bank.position,1e-10);
+close(automatic.reference_bank.covariance,manual.reference_bank.covariance,1e-10);
+close(automatic.reference_bank.cross_cov,manual.reference_bank.cross_cov,1e-10);
+
+% A late position observation rebuilds all later reference errors from the snapshot.
+motion_env.max_step=.100000000001;
+late=measurement; late.z=late.z+[.1;0;0]; late.t_received=s.t+.2;
+save=struct('model','save_reference','t_measure',imu.t_end);
+[timely,ok]=nav_assimilate_interval(after_range,imu,{late,save},{sensor,[]},motion_env,100);
+assert(ok.accepted&&all(cellfun(@(x)x.accepted,ok.observations)));
+next_imu=imu; next_imu.t_start=imu.t_end; next_imu.t_end=s.t+.2;
+next_imu.t_received=next_imu.t_end; next_imu.lineage={'bank_second_interval'};
+next_imu.reference_motion.t_start=next_imu.t_start; next_imu.reference_motion.t_end=next_imu.t_end;
+first_part=next_imu; first_part.t_end=s.t+.15; first_part.reference_motion.t_end=first_part.t_end;
+first_part.lineage={'manual_second_first'};
+[at_range,ok]=nav_assimilate(timely,first_part,[],motion_env,100); assert(ok.accepted);
+later=managed; later.t_measure=first_part.t_end; later.t_received=next_imu.t_end;
+later.lineage={'bank_later_range'};
+later.z=norm(at_range.state.p-at_range.reference_bank.position(1:3))+.1;
+[expected,ok]=nav_assimilate(at_range,later,sensor,motion_env,100); assert(ok.accepted);
+last_part=next_imu; last_part.t_start=first_part.t_end;
+last_part.reference_motion.t_start=last_part.t_start; last_part.lineage={'manual_second_last'};
+[expected,ok]=nav_assimilate(expected,last_part,[],motion_env,100); assert(ok.accepted);
+[rebuilt,ok]=nav_replay(after_range,{imu,next_imu},{later,late,save},{sensor,sensor,[]},motion_env,100);
+assert(ok.accepted&&all(cellfun(@(x)x.accepted,ok.observations)));
+close(rebuilt.state.p,expected.state.p,1e-10); close(rebuilt.jointP,expected.jointP,1e-10);
+close(rebuilt.reference_bank.position,expected.reference_bank.position,1e-10);
+close(rebuilt.reference_bank.covariance,expected.reference_bank.covariance,1e-10);
+close(rebuilt.reference_bank.cross_cov,expected.reference_bank.cross_cov,1e-10);
+[again,ok]=nav_replay(after_range,{imu,next_imu},{later,late,save},{sensor,sensor,[]},motion_env,100);
+assert(ok.accepted&&isequal(again,rebuilt));
+[without,ok]=nav_replay(after_range,{imu,next_imu},{later,save},{sensor,[]},motion_env,100);
+assert(ok.accepted&&norm(without.reference_bank.position-rebuilt.reference_bank.position)>1e-8);
+
+% Changing local axes preserves ranges and complete reference dependencies.
+destination=e; destination.frame_id='bank_rotated';
+destination.C_e_l=e.C_e_l*[0 -1 0;1 0 0;0 0 1];
+destination.origin_ecef=e.origin_ecef+e.C_e_l*[30;-20;10];
+[changed,changedP,~,changed_bank]=nav_change_frame(s,bankP,e,destination,bank);
+[restored,restoredP,~,restored_bank]=nav_change_frame(changed,changedP,destination,e,changed_bank);
+close(restored.p,s.p,1e-8); close(restoredP,bankP,1e-12);
+close(restored_bank.position,bank.position,1e-8);
+close(restored_bank.covariance,bank.covariance,1e-12);
+close(restored_bank.cross_cov,bank.cross_cov,1e-12);
+original_packet=m; original_packet.reference_bank=bank;
+changed_packet=original_packet; changed_packet.frame_id=destination.frame_id;
+changed_packet.reference_bank=changed_bank;
+original_observation=nav_measurement(s,original_packet,e);
+changed_observation=nav_measurement(changed,changed_packet,destination);
+close(changed_observation.predicted,original_observation.predicted,1e-8);
+[original_state,originalP,original_info]=nav_correct(s,bankP,original_observation,100);
+[changed_state,newP,new_info]=nav_correct(changed,changedP,changed_observation,100);
+[expected_state,expectedP,~,expected_bank]=nav_change_frame(original_state,originalP,e,destination,original_info.peer_update);
+close(changed_state.p,expected_state.p,1e-8); close(newP,expectedP,1e-8);
+close(new_info.peer_update.cross_cov,expected_bank.cross_cov,1e-8);
+close(new_info.peer_update.covariance,expected_bank.covariance,1e-8);
+[paired_states,pairedP,~,paired_bank]=nav_change_frame( ...
+    {cloned.reference,cloned.state},cloned.jointP,e,destination,cloned.reference_bank);
+assert(numel(paired_states)==2&&isequal(size(pairedP),[42 42]));
+close(paired_bank.cross_cov(1:21,:),paired_bank.cross_cov(22:42,:),1e-12);
+
+% Propagation and frame conversion commute, including the affine origin term.
+[~,~,~,rotated_bank,rotated_motion]=nav_change_frame(s,bankP,e,destination,bank,continuous);
+predicted_old=nav_predict_reference(bank,eye(21),continuous);
+predicted_new=nav_predict_reference(rotated_bank,eye(21),rotated_motion);
+[~,~,~,predicted_expected]=nav_change_frame(s,bankP,e,destination,predicted_old);
+close(predicted_new.position,predicted_expected.position,1e-8);
+close(predicted_new.covariance,predicted_expected.covariance,1e-10);
+close(predicted_new.cross_cov,predicted_expected.cross_cov,1e-10);
+discrete=struct('A',diag([1.1 1 1 .9 1 1]),'shift',[2;0;0;1;0;0], ...
+    'Q',eye(6)*.3,'t_start',s.t,'t_end',s.t+2,'frame_id',s.frame_id,'noise_independent',true);
+[~,~,~,rotated_bank,rotated_motion]=nav_change_frame(s,bankP,e,destination,bank,discrete);
+predicted_old=nav_predict_reference(bank,eye(21),discrete);
+predicted_new=nav_predict_reference(rotated_bank,eye(21),rotated_motion);
+[~,~,~,predicted_expected]=nav_change_frame(s,bankP,e,destination,predicted_old);
+close(predicted_new.position,predicted_expected.position,1e-8);
+close(predicted_new.covariance,predicted_expected.covariance,1e-10);
+close(predicted_new.cross_cov,predicted_expected.cross_cov,1e-10);
+bad_model=discrete; bad_model.frame_id='wrong';
+fails(@()nav_change_frame(s,bankP,e,destination,bank,bad_model),'libekf:Frame');
+
 % Impossible peer dependence must be rejected even perpendicular to the measured range.
 [s,e]=fixture; m=packet(s,'cooperative_range'); m.lever=zeros(3,1);
 m.station=s.p+[10;0;0]; m.z=10; m.peer_covariance=eye(3);

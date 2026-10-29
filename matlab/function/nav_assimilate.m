@@ -52,11 +52,38 @@ try
     inertial=strcmp(packet.model,'inertial');
     assert(~inertial||~isfield(packet,'retained_reference'),'libekf:Peer', ...
         'Retained reference correction is not an inertial propagation model.');
+    stored_bank=isfield(filter,'reference_bank');
+    if stored_bank
+        bank=filter.reference_bank;
+        assert(isstruct(bank)&&isscalar(bank)&&all(isfield(bank,{'t','frame_id'}))&& ...
+            isscalar(bank.t)&&bank.t==filter.state.t&&strcmp(bank.frame_id,filter.state.frame_id), ...
+            'libekf:Peer','Stored reference set must match current state.');
+        prior=filter.P; if paired, prior=J; end
+        check_bank(bank,prior);
+        assert(~isfield(packet,'reference_bank')&&~isfield(packet,'retained_reference'), ...
+            'libekf:Peer','Stored reference set cannot be overridden by a packet.');
+        if ~inertial
+            if strcmp(packet.model,'cooperative_range')
+                packet.reference_bank=bank;
+            else
+                assert(isfield(packet,'reference_noise_independent')&& ...
+                    isequal(packet.reference_noise_independent,true), ...
+                    'libekf:Correlation','Observation noise independence from stored references must be explicit.');
+                bank.noise_independent=true; packet.retained_reference=bank;
+            end
+        end
+    end
     if inertial
         [candidate,Q,T]=nav_predict(filter.state,filter.P,packet,env);
         if paired
             cross=J(1:21,22:42)*T.';
             J=[J(1:21,1:21) cross;cross.' Q];
+        end
+        if stored_bank
+            assert(isfield(packet,'reference_motion'),'libekf:Peer','Reference motion model required.');
+            transition=T; if paired, transition=blkdiag(eye(21),T); end
+            bank=nav_predict_reference(bank,transition,packet.reference_motion);
+            assert(bank.t==candidate.t,'libekf:Epoch','Reference and navigation propagation end times differ.');
         end
         ids=unique(packet.lineage(:));
     elseif odometry
@@ -100,6 +127,16 @@ try
         end
     end
     if ~inertial&&isfield(info,'peer_update'), result.peer_update=info.peer_update; end
+    if stored_bank
+        if ~inertial
+            update=info.peer_update;
+            for name={'position','covariance','cross_cov','t','frame_id'}
+                bank.(name{1})=update.(name{1});
+            end
+            if isfield(bank,'noise_independent'), bank=rmfield(bank,'noise_independent'); end
+        end
+        out.reference_bank=bank;
+    end
     if paired, out.reference=reference; out.jointP=J; end
     out.state=candidate; out.P=Q; out.used=[filter.used(:);ids];
     result.accepted=true; result.reason='Оценка обновлена; достоверность проверяет сторож';
@@ -110,4 +147,28 @@ catch ex
         rethrow(ex);
     end
 end
+end
+
+function check_bank(bank,P)
+assert(all(isfield(bank,{'ids','valid','position','covariance','cross_cov'}))&& ...
+    iscell(bank.ids)&&~isempty(bank.ids)&& ...
+    all(cellfun(@(x)ischar(x)&&~isempty(x),bank.ids))&& ...
+    numel(unique(bank.ids))==numel(bank.ids)&& ...
+    islogical(bank.valid)&&numel(bank.valid)==numel(bank.ids), ...
+    'libekf:Peer','Invalid stored reference identities or health flags.');
+d=3*numel(bank.ids); n=size(P,1);
+assert(any(n==[21 42])&&isequal(size(P),[n n])&&isreal(P)&&all(isfinite(P(:)))&& ...
+    isequal(size(bank.position),[d 1])&&isreal(bank.position)&&all(isfinite(bank.position))&& ...
+    isequal(size(bank.covariance),[d d])&&isreal(bank.covariance)&&all(isfinite(bank.covariance(:)))&& ...
+    isequal(size(bank.cross_cov),[n d])&&isreal(bank.cross_cov)&&all(isfinite(bank.cross_cov(:))), ...
+    'libekf:Covariance','Invalid stored reference matrices.');
+joint=[P bank.cross_cov;bank.cross_cov.' bank.covariance];
+assert(norm(joint-joint.','fro')<=1e-12*max(norm(joint,'fro'),realmin)&&all(diag(joint)>=0), ...
+    'libekf:Covariance','Invalid stored joint covariance.');
+scales=sqrt(diag(joint)); zero=scales==0;
+assert(all(all(joint(zero,:)==0)),'libekf:Correlation','Zero variance has nonzero reference dependence.');
+scales(zero)=1; normalized=(joint./scales)./scales.';
+values=eig((normalized+normalized.')/2);
+assert(min(values)>=-100*eps*(n+d)*max(1,max(abs(values))), ...
+    'libekf:Correlation','Stored navigation/reference covariance is inconsistent.');
 end
