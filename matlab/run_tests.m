@@ -308,6 +308,67 @@ m.noise_model='independent'; a.capacity=numel(a.used);
 % Здоровый другой источник всё же принимается, когда память доступна.
 a.capacity=10;
 [b,r]=nav_assimilate(a,m,sensor,e,100); assert(r.accepted && numel(b.used)==2);
+% Общие отсчёты допустимы только как условное наблюдение с действительно новой информацией.
+% x~N(0,1), z1=x+n1=2, z2=x+n2=4, Var(n1)=Var(n2)=1.
+% После z1: E(n1|z1)=1, Var(n1|z1)=1/2, Cov(e,n1|z1)=-1/2.
+old=packet(s,'gnss_position'); old.frame='SENSOR_LOCAL'; old.lever=zeros(3,1);
+old.z=s.p+[2;0;0]; old.lineage={'conditional_old'};
+[conditioned,info]=nav_assimilate(f,old,sensor,e,100); assert(info.accepted);
+conditioned.capacity=2;
+independent=old; independent.z=s.p+[4;0;0]; independent.lineage={'conditional_new'};
+[expected,info]=nav_assimilate(conditioned,independent,sensor,e,100); assert(info.accepted);
+combined=old; combined.z=s.p+[3;0;0]; combined.R=.375*eye(3);
+combined.lineage={'conditional_old','conditional_new'}; combined.noise_model='joint_required';
+combined.state_noise_frame_id=s.frame_id; combined.state_noise_cov=zeros(21,3);
+combined.state_noise_cov(1:3,:)=-.25*eye(3);
+combined.reuse=struct('lineage',{{'conditional_old'}},'history',{conditioned.used}, ...
+    'state_times',conditioned.state.t,'noise_mean',[.5;0;0]);
+[actual,info]=nav_assimilate(conditioned,combined,sensor,e,100); assert(info.accepted);
+close(actual.state.p,expected.state.p,1e-12); close(actual.P,expected.P,1e-12);
+close(actual.state.p,s.p+[2;0;0],1e-12); close(diag(actual.P(1:3,1:3)),ones(3,1)/3,1e-12);
+assert(numel(actual.used)==2);
+% Среднее условного шума поворачивается как ошибка, без переноса начала координат.
+rotation=[0 -1 0;1 0 0;0 0 1]; offset=[3;4;5];
+local=struct('C_e_l',rotation,'origin_ecef',offset,'frame_id','conditional_sensor');
+original=combined; original.frame='ECEF'; native=nav_packet_from_ecef(original,local);
+native.frame='SENSOR_LOCAL';
+rotated_sensor=struct('id',local.frame_id,'C_e_s',e.C_e_l*rotation, ...
+    'origin_ecef',e.origin_ecef+e.C_e_l*offset);
+[rotated_result,info]=nav_assimilate(conditioned,native,rotated_sensor,e,100);
+assert(info.accepted); close(rotated_result.state.p,actual.state.p,1e-12); close(rotated_result.P,actual.P,1e-12);
+
+[unchanged,info]=nav_assimilate(actual,combined,sensor,e,100);
+assert(~info.accepted&&isequal(unchanged,actual));
+for field={'lineage','history','state_times','noise_mean'}
+    bad=combined; bad.reuse=rmfield(bad.reuse,field{1});
+    [unchanged,info]=nav_assimilate(conditioned,bad,sensor,e,100);
+    assert(~info.accepted&&strcmp(info.reason,'libekf:Reuse')&&isequal(unchanged,conditioned));
+end
+% Та же условная поправка сохраняет связи с прошлой опорой камеры.
+paired=f; paired.reference=s; paired.reference.t=s.t-.1;
+paired.jointP=[eye(21) .5*eye(21);.5*eye(21) eye(21)];
+[paired,info]=nav_assimilate(paired,old,sensor,e,100); assert(info.accepted);
+[paired_expected,info]=nav_assimilate(paired,independent,sensor,e,100); assert(info.accepted);
+paired_packet=combined;
+paired_packet.state_noise_cov=-.5*paired.jointP(:,22:24);
+paired_packet.R=.25*(paired.P(1:3,1:3)+eye(3));
+paired_packet.reuse.noise_mean=.5*(old.z-paired.state.p);
+paired_packet.reuse.history=paired.used;
+paired_packet.reuse.state_times=[paired.reference.t paired.state.t];
+[paired_actual,info]=nav_assimilate(paired,paired_packet,sensor,e,100); assert(info.accepted);
+close(paired_actual.reference.p,paired_expected.reference.p,1e-12);
+close(paired_actual.state.p,paired_expected.state.p,1e-12);
+close(paired_actual.jointP,paired_expected.jointP,1e-12);
+bad=paired_packet; bad.reuse.state_times(1)=bad.reuse.state_times(1)-.1;
+[unchanged,info]=nav_assimilate(paired,bad,sensor,e,100);
+assert(~info.accepted&&strcmp(info.reason,'libekf:Reuse')&&isequal(unchanged,paired));
+bad=combined; bad.reuse.history={'different_history'};
+[unchanged,info]=nav_assimilate(conditioned,bad,sensor,e,100);
+assert(~info.accepted&&strcmp(info.reason,'libekf:Reuse')&&isequal(unchanged,conditioned));
+bad=combined; bad.noise_model='independent';
+[unchanged,info]=nav_assimilate(conditioned,bad,sensor,e,100);
+assert(~info.accepted&&strcmp(info.reason,'libekf:Reuse')&&isequal(unchanged,conditioned));
+
 end
 function requirement_common_correction
 [s,e]=fixture; s.q=[1;0;0;0];

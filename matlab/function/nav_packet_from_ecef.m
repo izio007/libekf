@@ -30,6 +30,14 @@ switch m.model
         % Right/body-local angular noise covariance is unchanged.
 end
 if ~isempty(T), out.R=T*m.R*T.'; end
+if ~isempty(T)&&isfield(m,'reuse')
+    assert(isstruct(m.reuse)&&isscalar(m.reuse)&&isfield(m.reuse,'noise_mean')&& ...
+        isnumeric(m.reuse.noise_mean)&&isreal(m.reuse.noise_mean)&& ...
+        numel(m.reuse.noise_mean)==size(T,2)&&all(isfinite(m.reuse.noise_mean(:))), ...
+        'libekf:Reuse','Invalid conditional mean for coordinate transformation.');
+    out.reuse.noise_mean=T*m.reuse.noise_mean(:);
+end
+
 if isfield(m,'state_noise_cov')&&~isempty(T)
     assert(size(m.state_noise_cov,2)==size(T,2),'libekf:Correlation','Wrong cross covariance columns.');
     out.state_noise_cov=m.state_noise_cov*T.';

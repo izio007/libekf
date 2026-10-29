@@ -173,8 +173,34 @@ try
             obs.t_start=reference.t; obs.t_end=filter.state.t;
         end
     end
-    if any(ismember(ids,filter.used))
-        result.reason='Повторное использование исходного отсчёта'; return;
+    overlap=intersect(ids,filter.used(:));
+    if ~isempty(overlap)
+        fresh=ids(~ismember(ids,filter.used));
+        if ~isfield(packet,'reuse')||isempty(fresh)
+            result.reason='Повторное использование исходного отсчёта'; return;
+        end
+        % Условное наблюдение содержит новую информацию и явно связано с текущей историей.
+        reuse=packet.reuse;
+        assert(~inertial&&~health&&strcmp(packet.noise_model,'joint_required')&& ...
+            isfield(obs,'state_noise_cov')&&isstruct(reuse)&&isscalar(reuse)&& ...
+            all(isfield(reuse,{'lineage','history','state_times','noise_mean'})), ...
+            'libekf:Reuse','Conditional measurement mean and covariance required.');
+        assert(iscell(reuse.lineage)&&iscell(reuse.history)&& ...
+            all(cellfun(@(x)ischar(x)&&isrow(x)&&~isempty(x),reuse.lineage))&& ...
+            all(cellfun(@(x)ischar(x)&&isrow(x)&&~isempty(x),reuse.history))&& ...
+            isequal(sort(reuse.lineage(:)),overlap(:))&& ...
+            isequal(reuse.history(:),filter.used(:)), ...
+            'libekf:Reuse','Shared records or conditioning history differ from the current filter.');
+        epochs=filter.state.t; if paired, epochs=[reference.t;filter.state.t]; end
+        mean_noise=reuse.noise_mean;
+        assert(isnumeric(reuse.state_times)&&isreal(reuse.state_times)&& ...
+            isequal(reuse.state_times(:),epochs(:))&&isnumeric(mean_noise)&&isreal(mean_noise)&& ...
+            isvector(mean_noise)&&numel(mean_noise)==numel(obs.residual)&&all(isfinite(mean_noise(:))), ...
+            'libekf:Reuse','Invalid conditioning epochs or residual noise mean.');
+        obs.residual=obs.residual-mean_noise(:);
+        ids=fresh; % Общие исходные записи не добавляются второй раз.
+    elseif isfield(packet,'reuse')
+        error('libekf:Reuse','Conditional reuse declared without a shared record.');
     end
     if numel(filter.used)+numel(ids)>filter.capacity
         result.reason='Исчерпана память происхождения измерений'; return;
