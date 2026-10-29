@@ -1695,6 +1695,33 @@ before=rng; motion=nav_visual_motion(pair,calibration.intrinsics,limits); after=
 assert(isequal(before,after)&&motion.geometry_ready&&strcmp(motion.quality,'UNASSESSED'));
 close(motion.rotation,Rtrue,1e-5); close(motion.direction,shift/norm(shift),1e-5);
 assert(~motion.scale_known&&~isfield(motion,'R'));
+% Несколько допустимых наборов должны сохранять одну геометрию либо явную неоднозначность.
+fitting=find(pair.training); selection_limits=limits;
+selection_limits.selection=struct('subsets',{{fitting(1:2:end),fitting(2:2:end)}}, ...
+    'rotation_limit',.01,'direction_limit',.05);
+stable=nav_visual_motion(pair,calibration.intrinsics,selection_limits);
+assert(stable.geometry_ready&&strcmp(stable.selection.status,'CONSISTENT'));
+assert(numel(stable.selection.candidates)==3&&strcmp(stable.quality,'UNASSESSED'));
+% Две пространственные группы имеют разные движения и обе представлены в проверочной части.
+mixed=pair; other_R=nav_rotation([cos(.03);sin(.03);0;0]); other_shift=[-.4;.2;.1];
+projection=K*(other_R.'*(points(:,101:end)-other_shift));
+mixed.second(101:end,:)=(projection(1:2,:)./projection(3,:)).';
+selection_limits.min_check_support=.4;
+selection_limits.selection.subsets={fitting(fitting<=100),fitting(fitting>100)};
+ambiguous=nav_visual_motion(mixed,calibration.intrinsics,selection_limits);
+assert(~ambiguous.geometry_ready&&strcmp(ambiguous.quality,'AMBIGUOUS')&& ...
+    strcmp(ambiguous.selection.status,'AMBIGUOUS')&&~isfield(ambiguous,'local_error'));
+assert(ambiguous.selection.direction_spread>selection_limits.selection.direction_limit);
+assert(nnz(cellfun(@(x)x.geometry_ready,ambiguous.selection.candidates))>=2);
+assert(isempty(ambiguous.rotation)&&isempty(ambiguous.direction));
+selection_limits.rank_tolerance=1e-10;
+with_covariance=nav_visual_motion(mixed,calibration.intrinsics,selection_limits,speye(800)*.04);
+assert(strcmp(with_covariance.quality,'AMBIGUOUS')&&~isfield(with_covariance,'local_error'));
+assert(nnz(cellfun(@(x)isfield(x,'covariance')&&~isempty(x.covariance),with_covariance.selection.candidates))>=2);
+
+bad_selection=selection_limits; bad_selection.selection.subsets{1}(1)=find(~pair.training,1);
+fails(@()nav_visual_motion(pair,calibration.intrinsics,bad_selection),'libekf:Vision');
+
 % Полная погрешность сохраняет связи направления и поворота и масштаб входного шума.
 limits.rank_tolerance=1e-10; C=speye(4*size(pair.first,1))*.04;
 uncertain=nav_visual_motion(pair,calibration.intrinsics,limits,C);

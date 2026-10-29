@@ -1,6 +1,6 @@
 function result=nav_visual_motion(matches,camera,limits,pixel_covariance)
 % Кандидат относительного движения по исправленным пиксельным соответствиям.
-% Масштаб и ковариация движения здесь не определяются; поправка фильтра не выдаётся.
+% Масштаб не определяется; условная локальная ковариация необязательна. Поправка фильтра не выдаётся.
 assert(isstruct(matches)&&isscalar(matches)&&all(isfield(matches, ...
     {'first','second','training','source','lineage','t_start','t_end','t_received','quality','units'})), ...
     'libekf:Vision','Incomplete image correspondences.');
@@ -31,6 +31,10 @@ assert(isnumeric(v)&&isreal(v)&&numel(v)==7&&all(isfinite(v))&& ...
     v(1)>=1&&v(1)==floor(v(1))&&v(2)>0&&v(2)<100&&v(3)>0&&v(4)>0&& ...
     v(5)>0&&v(5)<=1&&v(6)>0&&v(6)<=1&&v(7)>=0&&v(7)<=2^32-1&&v(7)==floor(v(7)), ...
     'libekf:Vision','Invalid motion estimation settings.');
+if isfield(limits,'selection')
+    covariance_args={}; if nargin>=4, covariance_args={pixel_covariance}; end
+    result=check_selection(matches,camera,limits,covariance_args); return;
+end
 K=[camera.FocalLength(1) camera.Skew camera.PrincipalPoint(1); ...
     0 camera.FocalLength(2) camera.PrincipalPoint(2);0 0 1];
 intrinsics=cameraIntrinsics(camera.FocalLength,camera.PrincipalPoint,camera.ImageSize,'Skew',camera.Skew);
@@ -178,5 +182,70 @@ for iteration=1:options.max_iterations
         info.converged=true; info.local_error=local;
         info.cost=correction.'*(C\correction); return;
     end
+end
+end
+
+function result=check_selection(matches,camera,limits,covariance_args)
+selection=limits.selection;
+assert(isstruct(selection)&&isscalar(selection)&&all(isfield(selection, ...
+    {'subsets','rotation_limit','direction_limit'}))&&iscell(selection.subsets)&& ...
+    ~isempty(selection.subsets), 'libekf:Vision','Explicit fitting subsets and angular limits required.');
+angles=[selection.rotation_limit selection.direction_limit];
+assert(isnumeric(angles)&&isreal(angles)&&numel(angles)==2&&all(isfinite(angles))&& ...
+    all(angles>0&angles<pi),'libekf:Vision','Invalid candidate separation limits.');
+base=rmfield(limits,'selection'); fitting=find(matches.training); checking=find(~matches.training);
+for k=1:numel(selection.subsets)
+    subset=selection.subsets{k};
+    assert(isnumeric(subset)&&isreal(subset)&&isvector(subset)&&numel(subset)>=8&& ...
+        all(isfinite(subset))&&numel(unique(subset))==numel(subset)&&all(ismember(subset,fitting)), ...
+        'libekf:Vision','Candidates must use distinct fitting indices, never held-out points.');
+end
+result=nav_visual_motion(matches,camera,base,covariance_args{:});
+candidates={candidate_summary(result)};
+for k=1:numel(selection.subsets)
+    subset=selection.subsets{k}(:); indices=[subset;checking];
+    part=matches; part.first=matches.first(indices,:); part.second=matches.second(indices,:);
+    part.training=[true(numel(subset),1);false(numel(checking),1)];
+    args={};
+    if ~isempty(covariance_args)
+        pixel_indices=reshape((4*(indices-1)+(1:4)).',[],1);
+        C=covariance_args{1}; args={C(pixel_indices,pixel_indices)};
+    end
+    candidate=nav_visual_motion(part,camera,base,args{:});
+    candidate.fitting_indices=indices(candidate.fitting_indices);
+    candidates{end+1}=candidate_summary(candidate);
+end
+ready=find(cellfun(@(x)x.geometry_ready,candidates));
+rotation_spread=0; direction_spread=0;
+for i=1:numel(ready)
+    for j=i+1:numel(ready)
+        a=candidates{ready(i)}; b=candidates{ready(j)};
+        rotation_spread=max(rotation_spread,acos(max(-1,min(1,(trace(a.rotation.'*b.rotation)-1)/2))));
+        direction_spread=max(direction_spread,acos(max(-1,min(1,a.direction.'*b.direction))));
+    end
+end
+status='INSUFFICIENT';
+if numel(ready)==numel(candidates), status='CONSISTENT'; end
+if rotation_spread>selection.rotation_limit||direction_spread>selection.direction_limit|| ...
+    any(cellfun(@(x)strcmp(x.quality,'AMBIGUOUS'),candidates))
+    status='AMBIGUOUS'; result.quality='AMBIGUOUS';
+end
+if ~strcmp(status,'CONSISTENT')
+    result.geometry_ready=false;
+    result.rotation=[]; result.direction=[]; result.fitting_indices=[];
+    if isfield(result,'refinement'), result=rmfield(result,'refinement'); end
+    if isfield(result,'local_error'), result=rmfield(result,'local_error'); end
+end
+result.selection=struct('status',status,'rotation_spread',rotation_spread, ...
+    'direction_spread',direction_spread,'candidates',{candidates});
+end
+
+function summary=candidate_summary(candidate)
+summary=struct('rotation',candidate.rotation,'direction',candidate.direction, ...
+    'quality',candidate.quality,'geometry_ready',candidate.geometry_ready, ...
+    'checking_support',candidate.checking_support,'fitting_indices',candidate.fitting_indices);
+if isfield(candidate,'local_error')
+    summary.covariance=candidate.local_error.covariance;
+    summary.tangent_basis=candidate.local_error.tangent_basis;
 end
 end
