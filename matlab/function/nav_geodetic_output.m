@@ -22,8 +22,16 @@ if isstruct(s)&&isscalar(s)&&isfield(s,'state')
     out=nav_geodetic_output(s.state,s.P,env,control);
     return;
 end
-assert(isequal(size(P),[21 21]) && all(isfinite(P(:))) && ...
+assert(isnumeric(P)&&isreal(P)&&isequal(size(P),[21 21]) && all(isfinite(P(:))) && ...
     norm(P-P.','fro')<=1e-12*max(norm(P,'fro'),realmin), 'libekf:Covariance','Invalid error covariance.');
+assert(all(diag(P)>=0),'libekf:Covariance','Negative state variance.');
+scales=sqrt(diag(P)); zero=scales==0;
+assert(~any(any(P(zero,:)~=0)),'libekf:Covariance','Zero variance has nonzero covariance.');
+scales(zero)=1; normalized=(P./scales)./scales.';
+assert(all(isfinite(normalized(:))),'libekf:Covariance','Covariance normalization overflow.');
+values=eig((normalized+normalized.')/2);
+assert(min(values)>=-100*eps*21*max(1,max(abs(values))), ...
+    'libekf:Covariance','Indefinite state covariance cannot describe geographic uncertainty.');
 assert(strcmp(s.frame_id,env.frame_id),'libekf:Frame','Wrong common navigation anchor.');
 nav_quaternion(env.C_e_l); % Proper rotation, not a tangent plane approximation.
 [alt,up,lat,lon]=nav_height_local(s.p,env);

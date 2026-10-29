@@ -938,6 +938,25 @@ assert(isequal(m.z,[4;-3;5]) && strcmp(m.frame,'SENSOR_LOCAL')); % Original unto
 s.p=[1000;0;0]; output=nav_geodetic_output(s,eye(21),env);
 assert(abs(output.lat)<1e-12 && abs(output.lon)<1e-12 && abs(output.alt-1000)<1e-8);
 assert(strcmp(output.quality.altitude,'UNASSESSED'));
+% Проекция в координаты не скрывает недопустимую ковариацию состояния.
+impossible=eye(21); impossible(20:21,20:21)=[1 2;2 1];
+fails(@()nav_geodetic_output(s,impossible,env),'libekf:Covariance');
+impossible=diag([1e-20 1e-20 ones(1,18) 1e20]);
+impossible(1,2)=2e-20; impossible(2,1)=2e-20;
+fails(@()nav_geodetic_output(s,impossible,env),'libekf:Covariance');
+impossible=eye(21); impossible(1,1)=0; impossible(1,2)=.1; impossible(2,1)=.1;
+fails(@()nav_geodetic_output(s,impossible,env),'libekf:Covariance');
+fails(@()nav_geodetic_output(s,eye(21)+1i*eye(21),env),'libekf:Covariance');
+impossible=eye(21); impossible(1:2,1:2)=[realmin realmax;realmax realmin];
+fails(@()nav_geodetic_output(s,impossible,env),'libekf:Covariance');
+% Допустимая вырожденность не требует искусственного добавления дисперсии.
+direction=linspace(-2,3,21).'; rank_one=direction*direction.';
+singular_output=nav_geodetic_output(s,rank_one,env);
+projected=singular_output.jacobian*direction;
+close(singular_output.covariance,projected*projected.',1e-12);
+zero_output=nav_geodetic_output(s,zeros(21),env);
+assert(all(zero_output.covariance(:)==0)&&strcmp(zero_output.quality.altitude,'UNASSESSED'));
+
 lat=pi/4; lon=pi/2; height=123;
 N=env.ellipsoid_a/sqrt(1-env.ellipsoid_e2*sin(lat)^2);
 expected=[(N+height)*cos(lat)*cos(lon);(N+height)*cos(lat)*sin(lon); ...
