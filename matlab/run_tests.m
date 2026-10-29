@@ -3328,6 +3328,35 @@ assert(clean_output.sources_complete&&isempty(clean_output.invalidated_sources)&
     strcmp(clean_output.quality.altitude,'NOT_READY'));
 
 
+% Производное наблюдение может относиться к более раннему времени, чем его исходные данные.
+derived=packet(mid,'external_position'); derived.frame='SENSOR_LOCAL';
+derived.lineage={'later_original'}; derived.lineage_times=mid.t+.02; derived.t_received=u.t_end+.1;
+at_frame=f; at_frame.state=mid; at_frame.P=midP;
+[derived_state,accepted]=nav_assimilate(at_frame,derived,sensor,e,1e8, ...
+    struct('now',derived.t_received,'max_age',1));
+assert(accepted.accepted&&derived_state.latest_input_epoch==derived.lineage_times);
+fails(@()nav_checkpoint(derived_state),'libekf:History');
+fails(@()nav_geodetic_output(derived_state,[],e,struct('now',mid.t,'checks',struct())), ...
+    'libekf:WatchOutput');
+published=nav_geodetic_output(derived_state,[],e,struct('now',derived.t_received,'checks',struct()));
+assert(published.t==mid.t);
+not_available=derived; not_available.lineage_times=derived.t_received+1;
+[unchanged,rejected]=nav_assimilate(at_frame,not_available,sensor,e,1e8);
+assert(~rejected.accepted&&strcmp(rejected.reason,'libekf:LineageTime')&&isequal(unchanged,at_frame));
+[unchanged,rejected]=nav_assimilate(at_frame,derived,sensor,e,1e8,struct('now',u.t_end,'max_age',1));
+assert(~rejected.accepted&&isequal(unchanged,at_frame));
+remaining=u; remaining.t_start=mid.t; remaining.lineage={'independent_remaining_imu'};
+[advanced,accepted]=nav_assimilate(derived_state,remaining,[],e,1e8); assert(accepted.accepted);
+closed=nav_checkpoint(advanced); assert(isempty(closed.used));
+repeated=packet(closed.state,'external_position'); repeated.frame='SENSOR_LOCAL';
+repeated.lineage=derived.lineage; repeated.lineage_times=derived.lineage_times;
+[unchanged,rejected]=nav_assimilate(closed,repeated,sensor,e,1e8);
+assert(~rejected.accepted&&strcmp(rejected.reason,'libekf:RetiredHistory')&&isequal(unchanged,closed));
+[delayed,accepted]=nav_replay(f,{u},{derived},{sensor},e,1e8, ...
+    {struct('now',derived.t_received,'max_age',1)});
+assert(accepted.accepted&&accepted.observations{1}.accepted);
+close(delayed.state.p,advanced.state.p,1e-11); close(delayed.P,advanced.P,1e-11);
+assert(delayed.latest_input_epoch==derived.lineage_times);
 % Отказ ИНС внутри интервала не допускает продолжения по тем же данным.
 report.target_source=u.source; report.t_measure=mid.t;
 [unchanged,info]=nav_assimilate_interval(f,u,{report},{[]},e,1e8);
@@ -3668,6 +3697,32 @@ prepared_before=nav_odometry_measurement(a,prior,prepared_packet);
 assert(prepared_info.accepted);
 prepared_after=nav_odometry_measurement(prepared_result.reference,prepared_result.state,prepared_packet);
 assert(norm(prepared_after.residual)<norm(prepared_before.residual));
+% Интерполяция к кадрам использует полученный отсчёт после второго кадра.
+bracketed=camera_raw; bracketed.epochs=[a.t-.01 a.t+.01 prior.t-.01 prior.t+.01];
+bracketed.accel=camera_raw.accel(:,[1 1 2 2]); bracketed.gyro=camera_raw.gyro(:,[1 1 2 2]);
+bracketed.lineage={'imu_first_before','imu_first_after','imu_second_before','imu_second_after'};
+bracketed.lineage_times=bracketed.epochs; bracketed.t_received=bracketed.epochs(end);
+bracketed.covariance=eye(24)*1e-4; bracketed.state_noise_cov=zeros(42,24);
+bracketed.interpolation_error=struct('mean',zeros(12,1),'covariance',zeros(12), ...
+    'state_cross_cov',zeros(42,12),'sample_cross_cov',zeros(24,12));
+bracket_limits=validity; bracket_limits.max_sample_gap=.021;
+interpolated_motion=nav_inertial_camera_motion({a,prior},filter.jointP,bracketed,camera_env,bracket_limits);
+interpolated_packet=prepared_packet; interpolated_packet.row_motion=interpolated_motion.motion;
+interpolated_packet.R=blkdiag(accelerated.R(1:6*n,1:6*n),interpolated_motion.covariance);
+interpolated_packet.state_noise_cov=[zeros(42,6*n) interpolated_motion.state_noise_cov];
+interpolated_packet.lineage=[accelerated.lineage(:);interpolated_motion.lineage(:)];
+interpolated_packet.lineage_times=[a.t;prior.t;interpolated_motion.lineage_times(:)];
+interpolated_packet.t_received=max(accelerated.t_received,interpolated_motion.t_received);
+[interpolated_result,accepted]=nav_assimilate(filter,interpolated_packet,[],camera_env,1000, ...
+    struct('now',interpolated_packet.t_received,'max_age',1));
+assert(accepted.accepted&&interpolated_result.latest_input_epoch==bracketed.epochs(end));
+before_interpolation=nav_odometry_measurement(a,prior,interpolated_packet);
+after_interpolation=nav_odometry_measurement(interpolated_result.reference,interpolated_result.state,interpolated_packet);
+assert(norm(after_interpolation.residual)<norm(before_interpolation.residual));
+fails(@()nav_checkpoint(interpolated_result),'libekf:History');
+[unchanged,rejected]=nav_assimilate(interpolated_result,interpolated_packet,[],camera_env,1000);
+assert(~rejected.accepted&&isequal(unchanged,interpolated_result));
+
 % Повторно использованные инерциальные отсчёты не скрываются внутри камеры.
 already=filter; already.used=prepared_motion.lineage;
 [unchanged,rejected]=nav_assimilate(already,prepared_packet,[],camera_env,1000);

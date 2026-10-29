@@ -13,6 +13,12 @@ try
     % Проверяем физическую модель и договор измерения до изменения состояния.
     assert(isstruct(packet)&&isscalar(packet)&&isfield(packet,'model')&& ...
         ischar(packet.model)&&~isempty(packet.model),'libekf:Packet','Missing physical model.');
+    latest_input=-Inf;
+    if isfield(filter,'latest_input_epoch')
+        latest_input=filter.latest_input_epoch;
+        assert(isnumeric(latest_input)&&isreal(latest_input)&&isscalar(latest_input)&&isfinite(latest_input), ...
+            'libekf:LineageTime','Invalid latest original input epoch.');
+    end
     if isfield(filter,'retired_through')||isfield(packet,'lineage_times')
         epoch_field='t_measure';
         if any(strcmp(packet.model,{'inertial','visual_odometry'})), epoch_field='t_end'; end
@@ -21,9 +27,19 @@ try
             isnumeric(packet.lineage_times)&&isreal(packet.lineage_times)&& ...
             isvector(packet.lineage_times)&&numel(packet.lineage_times)==numel(packet.lineage)&& ...
             all(isfinite(packet.lineage_times(:)))&&isnumeric(packet.(epoch_field))&& ...
-            isreal(packet.(epoch_field))&&isscalar(packet.(epoch_field))&&isfinite(packet.(epoch_field))&& ...
-            all(packet.lineage_times(:)<=packet.(epoch_field)), ...
+            isreal(packet.(epoch_field))&&isscalar(packet.(epoch_field))&&isfinite(packet.(epoch_field)), ...
             'libekf:LineageTime','Provide valid original record epochs, not packet arrival times.');
+        available=packet.(epoch_field);
+        if ~strcmp(packet.model,'inertial')
+            assert(isfield(packet,'t_received')&&isnumeric(packet.t_received)&&isreal(packet.t_received)&& ...
+                isscalar(packet.t_received)&&isfinite(packet.t_received)&&packet.t_received>=available, ...
+                'libekf:LineageTime','Derived observations require a valid availability time.');
+            available=packet.t_received;
+        end
+        assert(all(packet.lineage_times(:)<=available),'libekf:LineageTime', ...
+            'Original records must exist before the derived packet is available.');
+        latest_input=max(latest_input,max(packet.lineage_times(:)));
+
         if isfield(filter,'retired_through')
             boundary=filter.retired_through;
             assert(isnumeric(boundary)&&isreal(boundary)&&isscalar(boundary)&&isfinite(boundary)&& ...
@@ -352,6 +368,9 @@ try
     end
     if paired, out.reference=reference; out.jointP=J; end
     out.state=candidate; out.P=Q; out.used=[filter.used(:);ids];
+    if latest_input>candidate.t||isfield(filter,'latest_input_epoch')
+        out.latest_input_epoch=latest_input;
+    end
     if ~health, out.source_history=source_history; end
     if inertial
         transition=T; process_covariance=N;
