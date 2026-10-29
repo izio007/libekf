@@ -57,6 +57,25 @@ for k=1:numel(models)
     [same_state,same_P,correction]=nav_correct(f.state,f.P,ra.observation,1e8);
     close(same_state.p,a.state.p,1e-12); close(same_P,a.P,1e-12);
     close(correction.error_reset,ra.error_reset,1e-12);
+    % Общая аддитивная ошибка проходит через физическую модель каждого источника.
+    if strcmp(model.noise_model,'independent')&&~isfield(model,'peer_covariance')
+        count=numel(model.residual); labels=arrayfun(@(j)sprintf('shared_%d',j),1:count,'UniformOutput',false);
+        with_noise=f; with_noise.future_noise=struct('ids',{labels},'units',{model.units}, ...
+            'mean',zeros(count,1),'covariance',.1*model.R,'cross_cov',zeros(21,count), ...
+            'state_times',s.t,'frame_id',s.frame_id);
+        dependent=m; dependent.future_noise_independent=true;
+        dependent.shared_noise=struct('ids',{labels},'units',{model.units},'map',eye(count), ...
+            'residual_units',{model.units},'residual_frame_id',sensor0.id,'lineage',{{}});
+        [actual,accepted]=nav_assimilate(with_noise,dependent,sensor0,e,1e8);
+        assert(accepted.accepted,'libekf:AllSources','Shared error in %s rejected: %s',models{k},accepted.reason);
+        full=model; full.R=1.1*model.R;
+        for field={'input_noise_cov','state_input_cov','noise_transform'}
+            if isfield(full,field{1}), full=rmfield(full,field{1}); end
+        end
+        [expected_state,expected_P]=nav_correct(f.state,f.P,full,1e8);
+        close(actual.state.p,expected_state.p,1e-10); close(actual.P,expected_P,1e-10);
+    end
+
     % Определимость из принятой модели совпадает с отдельным расчётом без априорной P.
     history=struct('steps',{{struct('kind',m.model,'time',s.t,'data',ra)}}, ...
         'initial_times',s.t,'frame_id',s.frame_id,'noise_independent',true);
@@ -998,6 +1017,64 @@ end
 
 
 function requirement_correlated_measurement
+% Условные ошибки повторной калибровки готовятся из сохранённого набора автоматически.
+[s,e]=fixture; sensor=struct('id',s.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
+initial=struct('state',s,'P',eye(21),'used',{{}},'capacity',20);
+initial.future_noise=struct('ids',{{'bias_x','bias_y','bias_z'}},'units',{{'m','m','m'}}, ...
+    'mean',zeros(3,1),'covariance',eye(3),'cross_cov',zeros(21,3),'state_times',s.t,'frame_id',s.frame_id);
+one=packet(s,'gnss_position'); one.frame='SENSOR_LOCAL'; one.lever=zeros(3,1);
+one.z=s.p+[2;0;0]; one.R=eye(3); one.lineage={'calibration','sample_1'};
+one.future_noise_independent=true;
+one.shared_noise=struct('ids',{initial.future_noise.ids},'units',{initial.future_noise.units}, ...
+    'map',eye(3),'residual_units',{{'m','m','m'}},'residual_frame_id',sensor.id,'lineage',{{'calibration'}});
+[first_state,check]=nav_assimilate(initial,one,sensor,e,100); assert(check.accepted);
+two=one; two.z=s.p+[4;0;0]; two.lineage={'calibration','sample_2'};
+[second_state,check]=nav_assimilate(first_state,two,sensor,e,100); assert(check.accepted);
+% R двух измерений = [2 1;1 2]; начальная дисперсия положения = 1.
+close(second_state.state.p,s.p+[6/5;0;0],1e-12);
+close(second_state.P(1:3,1:3),(3/5)*eye(3),1e-12);
+close(second_state.future_noise.mean,[6/5;0;0],1e-12);
+close(second_state.future_noise.covariance,(3/5)*eye(3),1e-12);
+close(second_state.future_noise.cross_cov,[-.4*eye(3);zeros(18,3)],1e-12);
+close(check.observation.conditional_noise_mean,[2/3;0;0],1e-12);
+assert(numel(second_state.used)==3&&sum(strcmp(second_state.used,'calibration'))==1);
+[same,rejected]=nav_assimilate(second_state,two,sensor,e,100);
+assert(~rejected.accepted&&isequal(same,second_state));
+permuted=first_state; order=[3 1 2];
+permuted.future_noise.ids=permuted.future_noise.ids(order);
+permuted.future_noise.units=permuted.future_noise.units(order);
+permuted.future_noise.mean=permuted.future_noise.mean(order);
+permuted.future_noise.covariance=permuted.future_noise.covariance(order,order);
+permuted.future_noise.cross_cov=permuted.future_noise.cross_cov(:,order);
+[same,check]=nav_assimilate(permuted,two,sensor,e,100); assert(check.accepted);
+close(same.state.p,second_state.state.p,1e-12); close(same.P,second_state.P,1e-12);
+bad=two; bad.shared_noise.units{1}='s';
+[same,rejected]=nav_assimilate(first_state,bad,sensor,e,100);
+assert(~rejected.accepted&&strcmp(rejected.reason,'libekf:Correlation')&&isequal(same,first_state));
+bad=two; bad.shared_noise.residual_frame_id='another_sensor_axes';
+[same,rejected]=nav_assimilate(first_state,bad,sensor,e,100);
+assert(~rejected.accepted&&strcmp(rejected.reason,'libekf:Correlation')&&isequal(same,first_state));
+bad=two; bad.shared_noise.lineage={};
+[same,rejected]=nav_assimilate(first_state,bad,sensor,e,100);
+assert(~rejected.accepted&&strcmp(rejected.reason,'libekf:Reuse')&&isequal(same,first_state));
+% При поступлении старого пакета условная модель строится по пересчитанной истории.
+motion=e; motion.gravity_origin=zeros(3,1); motion.gravity_gradient=zeros(3);
+motion.gravity_radius=1e6; motion.max_step=.2; motion.state_noise_density=.01*eye(21);
+imu=struct('model','inertial','source','imu','lineage',{{'shared_replay_imu'}},'quality','VALID', ...
+    'frame','BODY','accel_unit','m/s^2','gyro_unit','rad/s','t_start',s.t,'t_end',s.t+.1, ...
+    't_received',s.t+.1,'accel',zeros(3,1),'gyro',zeros(3,1),'noise_density',.01*eye(6), ...
+    'future_noise_independent',true);
+one.t_measure=s.t+.025; one.t_received=imu.t_end; one.z=s.p+s.v*.025+[2;0;0];
+two.t_measure=s.t+.075; two.t_received=imu.t_end; two.z=s.p+s.v*.075+[4;0;0];
+[timely,check]=nav_assimilate_interval(initial,imu,{one,two},{sensor,sensor},motion,100);
+assert(check.accepted&&all(cellfun(@(z)z.accepted,check.observations)));
+[late,check]=nav_replay(initial,{imu},{two,one},{sensor,sensor},motion,100);
+assert(check.accepted&&all(cellfun(@(z)z.accepted,check.observations)));
+close(late.state.p,timely.state.p,1e-11); close(late.P,timely.P,1e-11);
+close(late.future_noise.mean,timely.future_noise.mean,1e-11);
+close(late.future_noise.covariance,timely.future_noise.covariance,1e-11);
+close(late.future_noise.cross_cov,timely.future_noise.cross_cov,1e-11);
+
 % Принятое измерение меняет распределение общей ошибки следующего измерения.
 [s,e]=fixture; sensor=struct('id',s.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
 f=struct('state',s,'P',eye(21),'used',{{}},'capacity',10);
