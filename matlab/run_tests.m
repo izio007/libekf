@@ -1665,6 +1665,29 @@ for j=1:4
     close((fp-fm)/(2*h),full(local.pixel_jacobian(1,j)),1e-8);
 end
 
+% Точки с большей погрешностью имеют меньший вес при уточнении движения.
+noisy_pair=pair; noisy_rows=1:4:size(pair.first,1);
+noisy_pair.second(noisy_rows,:)=noisy_pair.second(noisy_rows,:)+2*randn(stream,numel(noisy_rows),2);
+pixel_variance=.01*ones(4*size(pair.first,1),1);
+pixel_variance(4*noisy_rows-1)=4; pixel_variance(4*noisy_rows)=4;
+weighted_C=spdiags(pixel_variance,0,numel(pixel_variance),numel(pixel_variance));
+weighted_limits=limits; weighted_limits.fit_distance=8; weighted_limits.check_distance=2;
+initial_motion=nav_visual_motion(noisy_pair,calibration.intrinsics,weighted_limits);
+weighted_limits.refinement=struct('max_iterations',50,'angle_tolerance',1e-9,'pixel_tolerance',1e-7);
+refined=nav_visual_motion(noisy_pair,calibration.intrinsics,weighted_limits,weighted_C);
+assert(refined.refinement.converged&&refined.geometry_ready&&strcmp(refined.quality,'UNASSESSED'));
+assert(norm(refined.direction-shift/norm(shift))<norm(initial_motion.direction-shift/norm(shift)));
+rescaled=nav_visual_motion(noisy_pair,calibration.intrinsics,weighted_limits,16*weighted_C);
+assert(rescaled.refinement.converged);
+close(rescaled.rotation,refined.rotation,1e-8); close(rescaled.direction,refined.direction,1e-8);
+close(rescaled.local_error.covariance,16*refined.local_error.covariance,1e-8);
+spoiled=noisy_pair; spoiled.second(~pair.training,:)=spoiled.second(~pair.training,:)+[50 80];
+heldout=nav_visual_motion(spoiled,calibration.intrinsics,weighted_limits,weighted_C);
+assert(heldout.refinement.converged&&~heldout.geometry_ready);
+close(heldout.rotation,refined.rotation,0); close(heldout.direction,refined.direction,0);
+unfinished_limits=weighted_limits; unfinished_limits.refinement.max_iterations=1;
+unfinished=nav_visual_motion(noisy_pair,calibration.intrinsics,unfinished_limits,weighted_C);
+assert(~unfinished.refinement.converged&&~unfinished.geometry_ready&&~isfield(unfinished,'local_error'));
 bad_pair=pair; bad_pair.t_received=pair.t_start;
 fails(@()nav_visual_motion(bad_pair,calibration.intrinsics,limits),'libekf:Time');
 bad_pair=pair; bad_pair.lineage={'repeated','repeated'};

@@ -68,7 +68,7 @@ end
 result.geometry_ready=result.ambiguity.geometry_ready&&fraction>=limits.min_front_fraction&& ...
     result.checking_support>=limits.min_check_support;
 if result.geometry_ready, result.quality='UNASSESSED'; end
-if nargin>=4&&result.geometry_ready
+if nargin>=4
     assert(isfield(limits,'rank_tolerance')&&isscalar(limits.rank_tolerance)&& ...
         isreal(limits.rank_tolerance)&&isfinite(limits.rank_tolerance)&& ...
         limits.rank_tolerance>0&&limits.rank_tolerance<1, ...
@@ -82,12 +82,40 @@ if nargin>=4&&result.geometry_ready
     [~,flag]=chol(D*pixel_covariance*D);
     assert(flag==0,'libekf:Covariance','Pixel covariance must be positive definite.');
     indices=reshape((4*(chosen(:)-1)+(1:4)).',[],1);
-    result.local_error=local_error(matches.first(chosen,:),matches.second(chosen,:), ...
-        K,result.rotation,result.direction,pixel_covariance(indices,indices),limits.rank_tolerance);
+    C=pixel_covariance(indices,indices);
+    if isfield(limits,'refinement')
+        [R,d,refined]=refine_motion(matches.first(chosen,:),matches.second(chosen,:), ...
+            K,result.rotation,result.direction,C,limits.rank_tolerance,limits.refinement);
+        result.refinement=refined;
+        if ~refined.converged
+            result.geometry_ready=false; result.quality='UNASSESSED'; return;
+        end
+        result.rotation=R; result.direction=d;
+        E=R.'*nav_skew(d); F=K.'\E/K;
+        a=F*x; b=F.'*y; denominator=sum(a(1:2,:).^2,1)+sum(b(1:2,:).^2,1);
+        errors=Inf(size(denominator)); good=denominator>0;
+        errors(good)=abs(sum(y(:,good).*a(:,good),1))./sqrt(denominator(good));
+        result.checking_errors=errors(:); result.checking_support=mean(errors<=limits.check_distance);
+        first_rays=K\[matches.first(chosen,:).';ones(1,numel(chosen))];
+        second_rays=K\[matches.second(chosen,:).';ones(1,numel(chosen))];
+        front=false(numel(chosen),1);
+        for k=1:numel(chosen)
+            depths=[first_rays(:,k) -R*second_rays(:,k)]\d;
+            front(k)=all(isfinite(depths)&depths>0);
+        end
+        result.front_fraction=mean(front);
+        result.geometry_ready=result.ambiguity.geometry_ready&& ...
+            result.front_fraction>=limits.min_front_fraction&&result.checking_support>=limits.min_check_support;
+        result.quality='REJECTED'; if result.geometry_ready, result.quality='UNASSESSED'; end
+        result.local_error=refined.local_error;
+    else
+        result.local_error=local_error(matches.first(chosen,:),matches.second(chosen,:), ...
+            K,result.rotation,result.direction,C,limits.rank_tolerance);
+    end
 end
 end
 
-function out=local_error(first,second,K,R,d,C,tolerance)
+function [out,work]=local_error(first,second,K,R,d,C,tolerance)
 % Линеаризованная взвешенная модель, условная по выбранным соответствиям.
 % Порядок пикселей: x1,y1,x2,y2 для каждой пары; параметры: две компоненты направления, три поворота.
 [~,axis]=min(abs(d)); unit=zeros(3,1); unit(axis)=1;
@@ -107,11 +135,48 @@ scale=sqrt(diag(V)); normalized=(V./scale)./scale.';
 assert(flag==0&&all(isfinite(scale)&scale>0),'libekf:Covariance','Singular epipolar noise.');
 A=L\(J./scale); [~,S,W]=svd(A,'econ'); singular=diag(S);
 rank=sum(singular>max(tolerance,100*eps*max(size(A)))*max(singular));
+work=struct('L',L,'scale',scale,'A',A,'residual',sum(b.*(E*a),1).');
 out=struct('rank',rank,'tangent_basis',B,'state_jacobian',J,'pixel_jacobian',G, ...
     'singular_values',singular,'covariance',[],'quality','UNOBSERVABLE');
 if rank==5
     factor=W./singular.'; covariance=factor*factor.';
     out.covariance=(covariance+covariance.')/2;
     out.quality='LOCAL_LINEAR';
+end
+end
+
+function [R,d,info]=refine_motion(first,second,K,R,d,C,rank_tolerance,options)
+% Обобщённый метод наименьших квадратов с ошибками координат обоих кадров.
+assert(isstruct(options)&&isscalar(options)&&all(isfield(options, ...
+    {'max_iterations','angle_tolerance','pixel_tolerance'})), ...
+    'libekf:Vision','Explicit refinement convergence settings required.');
+v=[options.max_iterations options.angle_tolerance options.pixel_tolerance];
+assert(isnumeric(v)&&isreal(v)&&numel(v)==3&&all(isfinite(v))&& ...
+    v(1)>=1&&v(1)==floor(v(1))&&all(v(2:3)>0), ...
+    'libekf:Vision','Invalid refinement convergence settings.');
+y=reshape([first second].',[],1); correction=zeros(size(y));
+info=struct('converged',false,'iterations',0,'cost',Inf);
+for iteration=1:options.max_iterations
+    adjusted=reshape(y+correction,4,[]).';
+    [local,work]=local_error(adjusted(:,1:2),adjusted(:,3:4),K,R,d,C,rank_tolerance);
+    info.iterations=iteration;
+    if local.rank<5, return; end
+    rhs=work.L\((work.residual-local.pixel_jacobian*correction)./work.scale);
+    step=-(work.A\rhs);
+    multiplier=(work.L.'\(rhs+work.A*step))./work.scale;
+    candidate=-C*local.pixel_jacobian.'*multiplier;
+    if any(~isfinite(step))||any(~isfinite(candidate)), return; end
+    d=d+local.tangent_basis*step(1:2); d=d/norm(d);
+    R=R*expm(nav_skew(step(3:5)));
+    done=norm(step)<=options.angle_tolerance&&max(abs(candidate-correction))<=options.pixel_tolerance;
+    correction=candidate;
+    if done
+        adjusted=reshape(y+correction,4,[]).';
+        [local,work]=local_error(adjusted(:,1:2),adjusted(:,3:4),K,R,d,C,rank_tolerance);
+        pixel_error=abs(work.residual)./sqrt(full(sum(local.pixel_jacobian.^2,2)));
+        if local.rank<5||any(~isfinite(pixel_error))||max(pixel_error)>options.pixel_tolerance, return; end
+        info.converged=true; info.local_error=local;
+        info.cost=correction.'*(C\correction); return;
+    end
 end
 end
