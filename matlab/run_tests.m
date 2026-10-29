@@ -3169,6 +3169,21 @@ models={'gnss_position','external_position','gnss_velocity','external_velocity',
 end
 
 function requirement_all_source_timing
+% Большие абсолютные метки сохраняют соседние тики после целочисленного вычитания.
+origin=bitshift(uint64(1),60)+uint64(3);
+ticks=[origin-uint64(1),origin,origin+uint64(1),origin+uint64(2)];
+assert(numel(unique(double(ticks)))==1); % Раннее преобразование уже потеряло различия.
+relative=nav_time_from_ticks(ticks,origin,1e-9);
+close(relative,[-1 0 1 2]*1e-9,1e-24);
+offset=bitshift(uint64(1),59);
+assert(isequal(relative,nav_time_from_ticks(ticks+offset,origin+offset,1e-9)));
+assert(isequal(relative.',nav_time_from_ticks(ticks.',origin,1e-9)));
+last=intmax('uint64');
+close(nav_time_from_ticks([last-uint64(1),last],last,1e-9),[-1e-9 0],1e-24);
+fails(@()nav_time_from_ticks(double(ticks),origin,1e-9),'libekf:Time');
+fails(@()nav_time_from_ticks(last,uint64(0),1e-9),'libekf:TimePrecision');
+fails(@()nav_time_from_ticks(uint64(flintmax),uint64(0),1e-9),'libekf:TimePrecision');
+fails(@()nav_time_from_ticks(uint64(2),uint64(0),realmax),'libekf:TimePrecision');
 [s,e]=fixture; s.ba=zeros(3,1); s.bg=zeros(3,1);
 e.Omega=zeros(3,1); e.gravity_origin=zeros(3,1); e.gravity_gradient=zeros(3);
 e.gravity_radius=1e5; e.max_step=.125; e.state_noise_density=eye(21)*1e-8;
