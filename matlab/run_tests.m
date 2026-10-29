@@ -1347,6 +1347,38 @@ dependent_range.future_noise_cross_cov=.01;
 [~,dependent_info]=nav_assimilate(joint_advanced,dependent_range,range_sensor,motion,100);
 assert(dependent_info.accepted);
 close(dependent_info.observation.future_noise.measurement_cross_cov,expected_cross+.01,1e-12);
+% Одна калибровочная ошибка в двух дальностях не становится двумя независимыми ошибками.
+common_range=range_packet;
+common_range.shared_noise=struct('ids',{{'calibration'}},'units',{{'m'}},'map',1, ...
+    'residual_units',{{'m'}},'residual_frame_id',s.frame_id,'lineage',{{'range_calibration'}});
+common_state=joint_advanced;
+for observation=1:2
+    bank=common_state.reference_bank; noise=common_state.future_noise;
+    delta=common_state.state.p-bank.position; direction=delta.'/norm(delta);
+    common_range.z=norm(delta)+noise.mean+.2;
+    common_range.lineage={'range_calibration',sprintf('calibrated_range_%d',observation)};
+    prior_joint=[common_state.P bank.cross_cov noise.cross_cov; ...
+        bank.cross_cov.' bank.covariance noise.peer_cross_cov; ...
+        noise.cross_cov.' noise.peer_cross_cov.' noise.covariance];
+    geometry=[direction zeros(1,18) -direction 1];
+    gain=prior_joint*geometry.'/(geometry*prior_joint*geometry.'+common_range.R);
+    expected_joint=prior_joint-gain*geometry*prior_joint;
+    [corrected,accepted]=nav_assimilate(common_state,common_range,range_sensor,motion,100);
+    assert(accepted.accepted);
+    reset=blkdiag(accepted.error_reset,eye(4)); expected_joint=reset*expected_joint*reset.';
+    actual_joint=[corrected.P corrected.reference_bank.cross_cov corrected.future_noise.cross_cov; ...
+        corrected.reference_bank.cross_cov.' corrected.reference_bank.covariance corrected.future_noise.peer_cross_cov; ...
+        corrected.future_noise.cross_cov.' corrected.future_noise.peer_cross_cov.' corrected.future_noise.covariance];
+    close(actual_joint,expected_joint,1e-11);
+    close(corrected.state.p,common_state.state.p+gain(1:3)*.2,1e-11);
+    close(corrected.reference_bank.position,bank.position+gain(22:24)*.2,1e-11);
+    close(corrected.future_noise.mean,noise.mean+gain(25)*.2,1e-11);
+    common_state=corrected;
+end
+assert(sum(strcmp(common_state.used,'range_calibration'))==1);
+[unchanged,rejected]=nav_assimilate(common_state,common_range,range_sensor,motion,100);
+assert(~rejected.accepted&&isequal(unchanged,common_state));
+
 
 % Промежуточное сообщение здоровья делит интервал, не добавляя измерительной информации.
 event=struct('model','source_health','source','watch','lineage',{{'joint_health'}}, ...
