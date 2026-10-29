@@ -87,15 +87,23 @@ if isfield(options,'localization_covariance')||isfield(calibration,'parameter_co
         isequal(options.localization_independent,true)&&isequal(calibration.parameter_noise_independent,true), ...
         'libekf:Correlation','Explicit independent localization and calibration noise models required.');
     raw=reshape([selected_first selected_second].',2,[]).';
-    [result.pixel_covariance,result.calibration_jacobian]=pixel_uncertainty(raw,camera, ...
+    [result.pixel_covariance,result.calibration_jacobian,pixel_J]=pixel_uncertainty(raw,camera, ...
         options.localization_covariance,calibration.parameter_covariance);
     result.covariance_model='LOCAL_FIXED_MATCHES';
+end
+if isfield(options,'capture_covariance')
+    assert(capture_known&&isfield(result,'pixel_covariance')&& ...
+        isfield(options,'capture_noise_independent')&&isequal(options.capture_noise_independent,true), ...
+        'libekf:Correlation','Capture noise requires explicit independence from localization and calibration.');
+    result.coordinate_time_covariance=coordinate_time_noise(raw,pixel_J,result.calibration_jacobian, ...
+        camera.ImageSize,first.capture,second.capture,options.localization_covariance, ...
+        calibration.parameter_covariance,options.capture_covariance);
 end
 % Отложенные точки не участвовали ни в оценке движения, ни в геометрическом отборе.
 % Погрешность движения, различимость и масштаб по числу совпадений не выводятся.
 end
 
-function [C,J]=pixel_uncertainty(raw,camera,Cpoint,Ccal)
+function [C,J,pixel_J]=pixel_uncertainty(raw,camera,Cpoint,Ccal)
 % Параметры: fx,fy,cx,cy,skew,k1,k2,k3,p1,p2; исправленные пиксели при фиксированном номинальном K.
 assert(isnumeric(Cpoint)&&isreal(Cpoint)&&isequal(size(Cpoint),[2 2])&& ...
     all(isfinite(Cpoint(:)))&&norm(Cpoint-Cpoint.','fro')<=1e-12*max(norm(Cpoint,'fro'),realmin), ...
@@ -159,4 +167,34 @@ end
 interval=centre+[-half half];
 assert(all(isfinite(interval))&&frame.t_received>=interval(2), ...
     'libekf:Time','Frame received before acquisition completed.');
+end
+
+function C=coordinate_time_noise(raw,pixel_J,Jcal,image_size,first,second,Cpoint,Ccal,Ctime)
+% Совместные параметры времени: stamp1, exposure1, readout1, stamp2, exposure2, readout2.
+assert(isnumeric(Ctime)&&isreal(Ctime)&&isequal(size(Ctime),[6 6])&&all(isfinite(Ctime(:)))&& ...
+    norm(Ctime-Ctime.','fro')<=1e-12*max(norm(Ctime,'fro'),realmin)&&all(diag(Ctime)>=0), ...
+    'libekf:Covariance','Expected covariance of six capture parameters in seconds squared.');
+scale=sqrt(diag(Ctime)); zero=scale==0;
+assert(~any(any(Ctime(zero,:)~=0)),'libekf:Covariance','Impossible capture covariance.');
+normalized=(Ctime(~zero,~zero)./scale(~zero))./scale(~zero).';
+assert(isempty(normalized)||min(eig((normalized+normalized.')/2))>=-1e-12, ...
+    'libekf:Covariance','Indefinite capture covariance.');
+n=size(raw,1); coordinate_rows=reshape([3*(1:n)-2;3*(1:n)-1],[],1);
+A=sparse(3*n,2*n); A(coordinate_rows,:)=pixel_J;
+B=zeros(3*n,10); B(coordinate_rows,:)=Jcal;
+T=zeros(3*n,6); frames={first,second};
+for k=1:n
+    frame=mod(k-1,2)+1; c=frames{frame};
+    alpha=0;
+    if strcmp(c.stamp_reference,'first_row_start'), alpha=.5; end
+    if strcmp(c.stamp_reference,'last_row_end'), alpha=-.5; end
+    row=c.row_direction*((raw(k,2)-1)/(image_size(1)-1)-.5);
+    A(3*k,2*k)=c.row_direction*c.readout_time/(image_size(1)-1);
+    T(3*k,3*frame-2:3*frame)=[1 alpha alpha+row];
+end
+C=A*kron(speye(n),Cpoint)*A.';
+if any(Ccal(:)), C=C+B*Ccal*B.'; end
+if any(Ctime(:)), C=C+T*Ctime*T.'; end
+C=(C+C.')/2;
+assert(all(isfinite(C(:))),'libekf:Covariance','Nonfinite coordinate/time covariance.');
 end

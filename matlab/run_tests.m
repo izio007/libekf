@@ -1680,6 +1680,24 @@ noise_calibration.parameter_noise_independent=true;
 independent_pixels=nav_visual_matches(frame,next,noise_calibration,noise_options);
 dimension=4*size(independent_pixels.first,1); assert(dimension>=48);
 close(full(independent_pixels.pixel_covariance),.04*eye(dimension),1e-7);
+% Ошибка вертикальной координаты строки связана с ошибкой её времени.
+joint_options=noise_options; joint_options.capture_covariance=zeros(6);
+joint_options.capture_noise_independent=true;
+joint=nav_visual_matches(capture_first,capture_second,noise_calibration,joint_options);
+rate=.04/239; Cjoint=joint.coordinate_time_covariance;
+close(full(Cjoint(2,3)),.04*rate,1e-10); close(full(Cjoint(3,3)),.04*rate^2,1e-12);
+count=2*size(joint.first,1); pixel_rows=reshape([3*(1:count)-2;3*(1:count)-1],[],1);
+close(full(Cjoint(pixel_rows,pixel_rows)),full(joint.pixel_covariance),1e-10);
+joint_options.capture_covariance([1 4],[1 4])=.001;
+shared_time=nav_visual_matches(capture_first,capture_second,noise_calibration,joint_options);
+time_rows=3:3:size(Cjoint,1);
+close(full(shared_time.coordinate_time_covariance(time_rows,time_rows)-Cjoint(time_rows,time_rows)), ...
+    .001*ones(count),1e-12);
+reverse_joint=nav_visual_matches(reverse_first,reverse_second,noise_calibration,joint_options);
+close(full(reverse_joint.coordinate_time_covariance(2,3)),-.04*rate,1e-10);
+joint_options.capture_noise_independent=false;
+fails(@()nav_visual_matches(capture_first,capture_second,noise_calibration,joint_options),'libekf:Correlation');
+
 noise_calibration.parameter_covariance(3,3)=1;
 shared_pixels=nav_visual_matches(frame,next,noise_calibration,noise_options);
 common=zeros(dimension,1); common(1:2:end)=1;
