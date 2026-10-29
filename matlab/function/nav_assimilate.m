@@ -13,6 +13,12 @@ try
     % Проверяем физическую модель и договор измерения до изменения состояния.
     assert(isstruct(packet)&&isscalar(packet)&&isfield(packet,'model')&& ...
         ischar(packet.model)&&~isempty(packet.model),'libekf:Packet','Missing physical model.');
+    available_at=-Inf;
+    if isfield(filter,'available_at')
+        available_at=filter.available_at;
+        assert(isnumeric(available_at)&&isreal(available_at)&&isscalar(available_at)&&isfinite(available_at), ...
+            'libekf:Time','Invalid snapshot availability time.');
+    end
     latest_input=-Inf;
     if isfield(filter,'latest_input_epoch')
         latest_input=filter.latest_input_epoch;
@@ -55,6 +61,7 @@ try
             isscalar(reception.max_age)&&isreal(reception.max_age)&& ...
             isfinite(reception.max_age)&&reception.max_age>=0, ...
             'libekf:Time','Invalid processing time or permitted age.');
+        assert(reception.now>=available_at,'libekf:Time','Input snapshot uses data unavailable at processing time.');
         epoch_field='t_measure';
         if any(strcmp(packet.model,{'inertial','visual_odometry'})), epoch_field='t_end'; end
         assert(isfield(packet,epoch_field)&&isfield(packet,'t_received'), ...
@@ -368,6 +375,7 @@ try
     end
     if paired, out.reference=reference; out.jointP=J; end
     out.state=candidate; out.P=Q; out.used=[filter.used(:);ids];
+    out.available_at=max(available_at,packet.t_received);
     if latest_input>candidate.t||isfield(filter,'latest_input_epoch')
         out.latest_input_epoch=latest_input;
     end

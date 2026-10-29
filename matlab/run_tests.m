@@ -3350,6 +3350,14 @@ at_frame=f; at_frame.state=mid; at_frame.P=midP;
 [derived_state,accepted]=nav_assimilate(at_frame,derived,sensor,e,1e8, ...
     struct('now',derived.t_received,'max_age',1));
 assert(accepted.accepted&&derived_state.latest_input_epoch==derived.lineage_times);
+assert(derived_state.available_at==derived.t_received);
+fails(@()nav_geodetic_output(derived_state,[],e, ...
+    struct('now',derived.lineage_times+.001,'checks',struct())),'libekf:WatchOutput');
+earlier=derived; earlier.lineage={'earlier_arrival'}; earlier.t_received=derived.lineage_times;
+[unchanged,rejected]=nav_assimilate(derived_state,earlier,sensor,e,1e8, ...
+    struct('now',earlier.t_received,'max_age',1));
+assert(~rejected.accepted&&strcmp(rejected.reason,'libekf:Time')&&isequal(unchanged,derived_state));
+
 fails(@()nav_checkpoint(derived_state),'libekf:History');
 fails(@()nav_geodetic_output(derived_state,[],e,struct('now',mid.t,'checks',struct())), ...
     'libekf:WatchOutput');
@@ -3372,6 +3380,12 @@ assert(~rejected.accepted&&strcmp(rejected.reason,'libekf:RetiredHistory')&&iseq
 assert(accepted.accepted&&accepted.observations{1}.accepted);
 close(delayed.state.p,advanced.state.p,1e-11); close(delayed.P,advanced.P,1e-11);
 assert(delayed.latest_input_epoch==derived.lineage_times);
+assert(delayed.available_at==derived.t_received&&advanced.available_at==derived.t_received&& ...
+    closed.available_at==derived.t_received);
+failed=derived; failed.quality='FAILED'; failed.t_received=derived.t_received+100;
+[unaffected,accepted]=nav_replay(f,{u},{failed},{sensor},e,1e8);
+assert(accepted.accepted&&~accepted.observations{1}.accepted&&unaffected.available_at==u.t_received);
+
 % Отказ ИНС внутри интервала не допускает продолжения по тем же данным.
 report.target_source=u.source; report.t_measure=mid.t;
 [unchanged,info]=nav_assimilate_interval(f,u,{report},{[]},e,1e8);

@@ -33,6 +33,7 @@ if isfield(filter,'reference_bank')&&~isfield(imu.reference_motion,'F')
 end
 steps={};
 candidate=filter; candidate.used=whole.used; % Исходные данные ИНС учитываются ровно один раз.
+candidate.available_at=whole.available_at;
 n=numel(packets); epochs=Inf(1,n); checks=cell(size(packets));
 for k=1:n
     checks{k}=struct('accepted',false,'reason','libekf:Epoch','nis',NaN);
