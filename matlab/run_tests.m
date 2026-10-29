@@ -1616,6 +1616,34 @@ bad=next; bad.id=frame.id;
 fails(@()nav_visual_matches(frame,bad,calibration,options),'libekf:Vision');
 bad_calibration=calibration; bad_calibration.source='another_camera';
 fails(@()nav_visual_matches(frame,next,bad_calibration,options),'libekf:Quality');
+% Направление и поворот проверяются по независимо построенным проекциям 3D-сцены.
+points=[4*rand(stream,2,200)-2;4+8*rand(stream,1,200)];
+Rtrue=nav_rotation([cos(.04);0;sin(.04);0]); shift=[.5;.15;.03];
+K=[250 0 160;0 250 120;0 0 1];
+one=K*points; two=K*(Rtrue.'*(points-shift));
+pair=matches; pair.first=(one(1:2,:)./one(3,:)).'; pair.second=(two(1:2,:)./two(3,:)).';
+pair.training=false(200,1); pair.training(1:2:end)=true;
+limits=struct('trials',1000,'confidence',99.9,'fit_distance',.1,'check_distance',.1, ...
+    'min_check_support',.9,'min_front_fraction',.9,'seed',123, ...
+    'ambiguity',struct('rotation_rms',.1,'plane_rms',.1,'point_limit',.1,'min_support',.9));
+before=rng; motion=nav_visual_motion(pair,calibration.intrinsics,limits); after=rng;
+assert(isequal(before,after)&&motion.geometry_ready&&strcmp(motion.quality,'UNASSESSED'));
+close(motion.rotation,Rtrue,1e-5); close(motion.direction,shift/norm(shift),1e-5);
+assert(~motion.scale_known&&~isfield(motion,'R'));
+bad_pair=pair; bad_pair.t_received=pair.t_start;
+fails(@()nav_visual_motion(bad_pair,calibration.intrinsics,limits),'libekf:Time');
+bad_pair=pair; bad_pair.lineage={'repeated','repeated'};
+fails(@()nav_visual_motion(bad_pair,calibration.intrinsics,limits),'libekf:Lineage');
+% Изменение только проверочной части не меняет рассчитанное движение.
+corrupted=pair; corrupted.second(~pair.training,:)=corrupted.second(~pair.training,:)+[50 80];
+failed=nav_visual_motion(corrupted,calibration.intrinsics,limits);
+close(failed.rotation,motion.rotation,0); close(failed.direction,motion.direction,0);
+assert(~failed.geometry_ready&&~strcmp(failed.quality,'VALID'));
+% При чистом вращении перенос не считается определённым.
+two=K*(Rtrue.'*points); rotating=pair; rotating.second=(two(1:2,:)./two(3,:)).';
+unresolved=nav_visual_motion(rotating,calibration.intrinsics,limits);
+assert(~unresolved.geometry_ready&&unresolved.ambiguity.rotation_explains);
+
 K=[800 0 320;0 800 240;0 0 1];
 [x,y]=meshgrid(linspace(-2,2,6),linspace(-1.5,1.5,5));
 world=[x(:).';y(:).';10+2*sin((1:numel(x))*.7)];
