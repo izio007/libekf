@@ -1016,12 +1016,60 @@ second=rmfield(first,'future_noise'); second.z=s.p+[4;0;0];
 second.lineage={'shared_calibration','second_sample'}; second.R=future.covariance;
 second.state_noise_cov=future.cross_cov; second.state_noise_frame_id=s.frame_id;
 second.noise_model='joint_required';
+second.future_noise_independent=false; second.future_noise_cross_cov=future.covariance;
 second.reuse=struct('lineage',{{'shared_calibration'}},'history',{conditioned.used}, ...
     'state_times',future.state_times,'noise_mean',future.mean);
 [combined,accepted]=nav_assimilate(conditioned,second,sensor,e,100); assert(accepted.accepted);
 % Совместное аналитическое решение: R=[1 .5;.5 1], P0=1.
 close(combined.state.p,s.p+[12/7;0;0],1e-12);
 close(combined.P(1:3,1:3),(3/7)*eye(3),1e-12);
+assert(isequal(conditioned.future_noise,future)&&isequal(combined.future_noise,accepted.future_noise_update));
+% Связь общей ошибки переносится через движение, промежуточную поправку и смену опоры.
+motion=e; motion.gravity_origin=[0;0;-9.8]; motion.gravity_gradient=zeros(3);
+motion.gravity_radius=1e6; motion.max_step=.2; motion.state_noise_density=.01*eye(21);
+imu=struct('model','inertial','source','imu','lineage',{{'future_noise_imu'}},'quality','VALID', ...
+    'frame','BODY','accel_unit','m/s^2','gyro_unit','rad/s','t_start',s.t,'t_end',s.t+.1, ...
+    't_received',s.t+.1,'accel',zeros(3,1),'gyro',zeros(3,1),'noise_density',.01*eye(6), ...
+    'future_noise_independent',true);
+[advanced,ok]=nav_assimilate(conditioned,imu,[],motion,100); assert(ok.accepted);
+close(advanced.future_noise.cross_cov,ok.propagation.transition*future.cross_cov,1e-12);
+close(advanced.future_noise.covariance,future.covariance,0);
+close(advanced.future_noise.mean,future.mean,0); assert(advanced.future_noise.state_times==imu.t_end);
+half=imu; half.t_end=s.t+.05;
+[middle,Pmiddle,Tmiddle]=nav_predict(conditioned.state,conditioned.P,half,motion);
+observation=packet(middle,'external_position'); observation.lever=zeros(3,1); observation.frame='SENSOR_LOCAL';
+observation.future_noise_independent=true; observation.t_received=imu.t_end;
+observation.z=middle.p;
+[through,ok]=nav_assimilate_interval(conditioned,imu,{observation},{sensor},motion,100);
+assert(ok.accepted&&ok.observations{1}.accepted);
+H=[eye(3) zeros(3,18)]; U=Tmiddle*future.cross_cov; S=H*Pmiddle*H.'+eye(3);
+K=Pmiddle*H.'/S; Up=U-K*H*U; Vp=future.covariance-(H*U).'/S*(H*U);
+last=imu; last.t_start=middle.t;
+[~,~,Tlast]=nav_predict(middle,Pmiddle-K*H*Pmiddle,last,motion);
+close(through.future_noise.cross_cov,Tlast*Up,1e-11);
+close(through.future_noise.covariance,Vp,1e-11);
+[replayed,ok]=nav_replay(conditioned,{imu},{observation},{sensor},motion,100);
+assert(ok.accepted); close(replayed.future_noise.cross_cov,through.future_noise.cross_cov,1e-12);
+saved=nav_save_reference(through);
+close(saved.future_noise.cross_cov,[through.future_noise.cross_cov;through.future_noise.cross_cov],1e-12);
+assert(isequal(saved.future_noise.state_times,[imu.t_end;imu.t_end]));
+% Для целого шага допускается явно заданная связь нового процессного шума с общим.
+correlated=imu; correlated.future_noise_independent=false;
+correlated.future_noise_process_cross_cov=[.001*eye(3);zeros(18,3)];
+[moved,ok]=nav_assimilate(conditioned,correlated,[],motion,100); assert(ok.accepted);
+close(moved.future_noise.cross_cov,advanced.future_noise.cross_cov+correlated.future_noise_process_cross_cov,1e-12);
+[same,rejected]=nav_assimilate_interval(conditioned,correlated,{observation},{sensor},motion,100);
+assert(~rejected.accepted&&isequal(same,conditioned));
+bad=imu; bad.future_noise_process_cross_cov=correlated.future_noise_process_cross_cov;
+[same,rejected]=nav_assimilate(conditioned,bad,[],motion,100);
+assert(~rejected.accepted&&strcmp(rejected.reason,'libekf:Correlation')&&isequal(same,conditioned));
+bad=rmfield(imu,'future_noise_independent');
+[same,rejected]=nav_assimilate(conditioned,bad,[],motion,100);
+assert(~rejected.accepted&&strcmp(rejected.reason,'libekf:Correlation')&&isequal(same,conditioned));
+bad=correlated; bad.future_noise_process_cross_cov=100*bad.future_noise_process_cross_cov;
+[same,rejected]=nav_assimilate(conditioned,bad,[],motion,100);
+assert(~rejected.accepted&&strcmp(rejected.reason,'libekf:Correlation')&&isequal(same,conditioned));
+
 % Сохранённая опора сохраняет ту же общую ошибку, а не независимую копию.
 paired=nav_save_reference(f); with_pair=first;
 with_pair.future_noise.cross_cov=zeros(42,3); with_pair.future_noise.state_times=[s.t;s.t];

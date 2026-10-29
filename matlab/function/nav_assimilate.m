@@ -86,6 +86,17 @@ try
     end
     assert(~inertial||~isfield(packet,'retained_reference'),'libekf:Peer', ...
         'Retained reference correction is not an inertial propagation model.');
+    stored_noise=isfield(filter,'future_noise');
+    if stored_noise
+        future=filter.future_noise; prior=filter.P; epochs=filter.state.t;
+        if paired, prior=J; epochs=[filter.reference.t;filter.state.t]; end
+        assert(~isfield(packet,'future_noise')&&isfield(future,'state_times')&& ...
+            isfield(future,'frame_id')&&isequal(future.state_times(:),epochs(:))&& ...
+            strcmp(future.frame_id,filter.state.frame_id), ...
+            'libekf:Correlation','Stored errors cannot be overridden or used at another epoch/frame.');
+        future=nav_predict_noise(future,prior,eye(size(prior)),zeros(size(prior)),epochs, ...
+            zeros(size(prior,1),numel(future.mean)));
+    end
     stored_bank=isfield(filter,'reference_bank');
     if stored_bank
         bank=filter.reference_bank;
@@ -152,6 +163,22 @@ try
             bank=nav_predict_reference(bank,transition,packet.reference_motion);
             assert(bank.t==candidate.t,'libekf:Epoch','Reference and navigation propagation end times differ.');
         end
+        if stored_noise
+            assert(isfield(packet,'future_noise_independent')&& ...
+                (isequal(packet.future_noise_independent,true)||isequal(packet.future_noise_independent,false)), ...
+                'libekf:Correlation','Declare new process/stored-noise dependence.');
+            transition=T; process=N; epochs=candidate.t; prior=filter.P;
+            if paired
+                transition=blkdiag(eye(21),T); process=blkdiag(zeros(21),N);
+                prior=filter.jointP; epochs=[filter.reference.t;candidate.t];
+            end
+            W=zeros(size(transition,1),numel(future.mean));
+            if isfield(packet,'future_noise_process_cross_cov'), W=packet.future_noise_process_cross_cov; end
+            assert((packet.future_noise_independent&&all(W(:)==0))|| ...
+                (~packet.future_noise_independent&&isfield(packet,'future_noise_process_cross_cov')), ...
+                'libekf:Correlation','Missing or contradictory process/stored-noise covariance.');
+            future=nav_predict_noise(future,prior,transition,process,epochs,W);
+        end
         ids=unique(packet.lineage(:));
     elseif odometry
         assert(paired,'libekf:State','Odometry requires a saved reference state.');
@@ -172,6 +199,17 @@ try
             else, obs.H=[zeros(size(obs.H,1),21) obs.H]; end
             obs.t_start=reference.t; obs.t_end=filter.state.t;
         end
+    end
+    if stored_noise&&~inertial&&~health
+        assert(isfield(packet,'future_noise_independent')&& ...
+            (isequal(packet.future_noise_independent,true)||isequal(packet.future_noise_independent,false)), ...
+            'libekf:Correlation','Declare measurement/stored-noise dependence.');
+        D=zeros(numel(future.mean),numel(obs.residual));
+        if isfield(packet,'future_noise_cross_cov'), D=packet.future_noise_cross_cov; end
+        assert((packet.future_noise_independent&&all(D(:)==0))|| ...
+            (~packet.future_noise_independent&&isfield(packet,'future_noise_cross_cov')), ...
+            'libekf:Correlation','Missing or contradictory measurement/stored-noise covariance.');
+        future.measurement_cross_cov=D; obs.future_noise=future;
     end
     if isfield(packet,'future_noise')
         assert(~inertial&&~health,'libekf:Correlation','Future-noise conditioning requires an observation.');
@@ -233,7 +271,11 @@ try
         source_history=nav_sources(source_history,packet);
     end
     if ~inertial&&~health&&isfield(info,'peer_update'), result.peer_update=info.peer_update; end
-    if ~inertial&&~health&&isfield(info,'future_noise_update'), result.future_noise_update=info.future_noise_update; end
+    if ~inertial&&~health&&isfield(info,'future_noise_update')
+        result.future_noise_update=info.future_noise_update; out.future_noise=info.future_noise_update;
+    elseif stored_noise
+        out.future_noise=future;
+    end
     if stored_bank
         if ~inertial&&~health
             update=info.peer_update;

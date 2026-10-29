@@ -21,6 +21,9 @@ if isempty(packets)
     out=whole; result.accepted=true; result.reason=check.reason;
     result.steps={struct('kind','propagation','data',check.propagation)}; return;
 end
+if isfield(filter,'future_noise')&&~isequal(imu.future_noise_independent,true)
+    result.reason='libekf:Correlation'; return; % Для разбиения нужна временная модель общего шума.
+end
 if isfield(filter,'reference_bank')&&~isfield(imu.reference_motion,'F')
     result.reason='libekf:ReferenceInterval'; return;
 end
@@ -99,6 +102,15 @@ end
 transition=T; process_covariance=N;
 if isfield(in,'reference')
     transition=blkdiag(eye(21),T); process_covariance=blkdiag(zeros(21),N);
+end
+if isfield(in,'future_noise')
+    assert(isfield(imu,'future_noise_independent')&&isequal(imu.future_noise_independent,true)&& ...
+        (~isfield(imu,'future_noise_process_cross_cov')||all(imu.future_noise_process_cross_cov(:)==0)), ...
+        'libekf:Correlation','Splitting correlated process/stored noise requires a temporal model.');
+    prior=in.P; epochs=out.state.t;
+    if isfield(in,'reference'), prior=in.jointP; epochs=[in.reference.t;out.state.t]; end
+    out.future_noise=nav_predict_noise(in.future_noise,prior,transition,process_covariance, ...
+        epochs,zeros(size(transition,1),numel(in.future_noise.mean)));
 end
 record=struct('transition',transition,'process_covariance',process_covariance, ...
     't_start',part.t_start,'t_end',part.t_end,'frame_id',in.state.frame_id, ...
