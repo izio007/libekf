@@ -2,6 +2,38 @@ function [out,Pout,J,reference_out,motion_out]=nav_change_frame(s,P,from,to,refe
 % Exact Earth-fixed change of origin/axes; no flat-Earth approximation.
 % Temporal meaning and right/body-local attitude errors remain unchanged.
 reference_out=[]; motion_out=[];
+% Полный снимок фильтра: переносим все сохранённые связи одним действием.
+if isstruct(s)&&isscalar(s)&&isfield(s,'state')
+    assert(nargin==4&&isempty(P)&&isfield(s,'P')&&isequal(size(s.P),[21 21]), ...
+        'libekf:State','Use nav_change_frame(filter,[],from,to) for a complete filter snapshot.');
+    prior=s.P; states=s.state; epochs=s.state.t;
+    if isfield(s,'reference')
+        assert(isfield(s,'jointP')&&isequal(size(s.jointP),[42 42])&& ...
+            isequal(s.P,s.jointP(22:42,22:42)), ...
+            'libekf:Covariance','Current and joint covariance disagree.');
+        prior=s.jointP; states={s.reference,s.state}; epochs=[s.reference.t;s.state.t];
+    end
+    args={}; if isfield(s,'reference_bank'), args={s.reference_bank}; end
+    [states,Pout,J,reference_out]=nav_change_frame(states,prior,from,to,args{:});
+    out=s;
+    if iscell(states)
+        out.reference=states{1}; out.state=states{2}; out.jointP=Pout; out.P=Pout(22:42,22:42);
+    else
+        out.state=states; out.P=Pout;
+    end
+    if isfield(s,'reference_bank'), out.reference_bank=reference_out; end
+    if isfield(s,'future_noise')
+        noise=s.future_noise;
+        assert(isfield(noise,'state_times')&&isfield(noise,'frame_id')&& ...
+            isequal(noise.state_times(:),epochs(:))&&strcmp(noise.frame_id,from.frame_id)&& ...
+            ~isfield(noise,'peer_cross_cov'),'libekf:Correlation','Invalid stored-noise source frame or joint reference model.');
+        out.future_noise=nav_predict_noise(noise,prior,J,zeros(size(Pout)),epochs, ...
+            zeros(size(J,1),numel(noise.mean)));
+        out.future_noise.frame_id=to.frame_id;
+    end
+    return;
+end
+
 if nargin>=6, motion_out=change_motion(motion,numel(reference.position),from,to); end
 if iscell(s)
     assert(numel(s)==2&&isequal(size(P),[42 42])&&all(isfinite(P(:))), ...

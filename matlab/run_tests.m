@@ -1085,6 +1085,40 @@ assert(~rejected.accepted&&strcmp(rejected.reason,'libekf:Correlation')&&isequal
 bad=two; bad.shared_noise.lineage={};
 [same,rejected]=nav_assimilate(first_state,bad,sensor,e,100);
 assert(~rejected.accepted&&strcmp(rejected.reason,'libekf:Reuse')&&isequal(same,first_state));
+% Смена местного начала и осей сохраняет следующую поправку с общей ошибкой.
+to=e; to.frame_id='shared_error_other_axes';
+to.C_e_l=e.C_e_l*nav_rotation([.9;.1;-.2;.3]/norm([.9;.1;-.2;.3]));
+to.origin_ecef=e.origin_ecef+[300;-200;50];
+for paired_case=[false true]
+    seed=first_state; if paired_case, seed=nav_save_reference(seed); end
+    [expected,ok]=nav_assimilate(seed,two,sensor,e,100); assert(ok.accepted);
+    [converted,~,J]=nav_change_frame(seed,[],e,to);
+    close(converted.future_noise.cross_cov,J*seed.future_noise.cross_cov,1e-12);
+    assert(isequal(converted.future_noise.mean,seed.future_noise.mean)&& ...
+        isequal(converted.future_noise.covariance,seed.future_noise.covariance));
+    assert(isequal(converted.used,seed.used)&&isequal(converted.source_history,seed.source_history));
+    [actual,ok]=nav_assimilate(converted,two,sensor,to,100); assert(ok.accepted);
+    expected=nav_change_frame(expected,[],e,to);
+    close(actual.state.p,expected.state.p,1e-9); close(actual.P,expected.P,1e-11);
+    close(actual.future_noise.mean,expected.future_noise.mean,1e-9);
+    close(actual.future_noise.covariance,expected.future_noise.covariance,1e-11);
+    close(actual.future_noise.cross_cov,expected.future_noise.cross_cov,1e-11);
+    if paired_case
+        close(actual.reference.p,expected.reference.p,1e-9); close(actual.jointP,expected.jointP,1e-11);
+    end
+    restored=nav_change_frame(converted,[],to,e);
+    close(restored.state.p,seed.state.p,1e-9); close(restored.P,seed.P,1e-11);
+    close(restored.future_noise.cross_cov,seed.future_noise.cross_cov,1e-11);
+end
+with_reference=rmfield(first_state,'future_noise');
+with_reference.reference_bank=struct('ids',{{'peer'}},'valid',true,'position',s.p+[100;20;0], ...
+    'covariance',eye(3),'cross_cov',zeros(21,3),'t',s.t,'frame_id',s.frame_id);
+converted=nav_change_frame(with_reference,[],e,to);
+[~,~,~,expected_reference]=nav_change_frame(with_reference.state,with_reference.P,e,to,with_reference.reference_bank);
+assert(isequal(converted.reference_bank,expected_reference));
+bad=first_state; bad.future_noise.state_times=s.t-1;
+fails(@()nav_change_frame(bad,[],e,to),'libekf:Correlation');
+
 % При поступлении старого пакета условная модель строится по пересчитанной истории.
 motion=e; motion.gravity_origin=zeros(3,1); motion.gravity_gradient=zeros(3);
 motion.gravity_radius=1e6; motion.max_step=.2; motion.state_noise_density=.01*eye(21);
