@@ -1498,6 +1498,50 @@ m=struct('source','camera','lineage',{{'frame100','frame101'}},'quality','VALID'
     'z',[3;4;0],'R',eye(3),'camera_to_body',eye(3),'lever',[1;0;0], ...
     'scale_valid',true,'calibration_valid',true);
 o=nav_odometry_measurement(a,b,m); close(o.predicted,[3;4;0],1e-12);
+% Общий сдвиг часов не меняет относительный перенос при постоянной скорости.
+time_a=a; time_b=b; time_a.v=[3;4;0]; time_b.v=time_a.v;
+timed=m; timed.time_covariance=diag([.01 .04]); timed.time_independent=true;
+timed.time_linearization=struct('body_rates',zeros(3,2),'epochs',[a.t b.t], ...
+    'unit','rad/s','reference','earth','valid',true);
+time_obs=nav_odometry_measurement(time_a,time_b,timed);
+close(time_obs.time_jacobian,[-time_a.v time_b.v],1e-12);
+close(time_obs.R,m.R+.05*(time_a.v*time_a.v.'),1e-12);
+timed.time_covariance=.04*ones(2);
+close(nav_odometry_measurement(time_a,time_b,timed).R,m.R,1e-12);
+% В одном наблюдении времени связывают ошибки направления и поворота.
+timed.mode='direction_rotation'; timed.z=[.6;.8;0;1;0;0;0];
+timed.tangent_basis=[-.8 0;.6 0;0 1]; timed.min_displacement=.01; timed.max_angle=.3;
+timed.units={'1';'1';'rad';'rad';'rad'}; timed.R=eye(5); timed.scale_valid=false;
+time_b.v=[1;-2;.5]; timed.time_covariance=[.01 .005;.005 .04];
+timed.time_linearization.body_rates=[.1 -.2;.2 .1;.3 .2];
+time_obs=nav_odometry_measurement(time_a,time_b,timed);
+plain=rmfield(timed,{'time_covariance','time_independent','time_linearization'});
+base=nav_odometry_measurement(time_a,time_b,plain);
+close(time_obs.R,base.R+time_obs.time_jacobian*timed.time_covariance*time_obs.time_jacobian.',1e-12);
+assert(norm(time_obs.R(1:2,3:5),'fro')>0);
+for epoch=1:2
+    state=time_a; if epoch==2, state=time_b; end
+    delta=zeros(21,1); delta(1:3)=state.v*1e-6;
+    delta(7:9)=timed.time_linearization.body_rates(:,epoch)*1e-6;
+    if epoch==1
+        plus=nav_odometry_measurement(nav_apply_error(time_a,delta),time_b,plain);
+        minus=nav_odometry_measurement(nav_apply_error(time_a,-delta),time_b,plain);
+    else
+        plus=nav_odometry_measurement(time_a,nav_apply_error(time_b,delta),plain);
+        minus=nav_odometry_measurement(time_a,nav_apply_error(time_b,-delta),plain);
+    end
+    close(-(plus.residual-minus.residual)/(2e-6),time_obs.time_jacobian(:,epoch),1e-8);
+end
+[~,Qbase,accepted]=nav_correct({time_a,time_b},eye(42),base,100); assert(accepted.accepted);
+[~,Qtime,accepted]=nav_correct({time_a,time_b},eye(42),time_obs,100); assert(accepted.accepted);
+assert(trace(Qtime)>trace(Qbase)&&min(eig(Qtime-Qbase))>=-1e-10);
+bad_time=timed; bad_time.time_independent=false;
+fails(@()nav_odometry_measurement(time_a,time_b,bad_time),'libekf:Correlation');
+bad_time=timed; bad_time.time_linearization.unit='deg/s';
+fails(@()nav_odometry_measurement(time_a,time_b,bad_time),'libekf:Time');
+bad_time=timed; bad_time.time_covariance=[1 2;2 1];
+fails(@()nav_odometry_measurement(time_a,time_b,bad_time),'libekf:Covariance');
+
 b.p=zeros(3,1); b.q=[cos(pi/4);0;0;sin(pi/4)];
 close(nav_odometry_measurement(a,b,m).predicted,[-1;1;0],1e-12);
 o=nav_odometry_measurement(a,b,m); numeric=zeros(3,42);

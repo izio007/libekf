@@ -24,12 +24,17 @@ if any(strcmp(mode,{'pose','direction_rotation'}))
     if isfield(m,'state_noise_cov')
         first=rmfield(first,'state_noise_cov'); second=rmfield(second,'state_noise_cov');
     end
+    % Общий шум времён добавляется один раз после объединения направления и поворота.
+    for name={'time_covariance','time_independent','time_linearization'}
+        if isfield(first,name{1}), first=rmfield(first,name{1}); end
+        if isfield(second,name{1}), second=rmfield(second,name{1}); end
+    end
     one=nav_odometry_measurement(a,b,first); two=nav_odometry_measurement(a,b,second);
     obs=one; obs.predicted=[one.predicted;two.predicted];
     obs.residual=[one.residual;two.residual]; obs.H=[one.H;two.H];
     obs.noise_transform=blkdiag(one.noise_transform,two.noise_transform);
     obs.R=obs.noise_transform*raw*obs.noise_transform.'; obs.R=(obs.R+obs.R.')/2;
-    obs.units=m.units; obs=attach_dependence(obs,m); return;
+    obs.units=m.units; obs=attach_dependence(obs,m); obs=attach_time(obs,a,b,m); return;
 end
 assert(any(strcmp(mode,{'metric','direction','rotation'})),'libekf:Model','Unknown odometry mode.');
 assert(strcmp(m.quality,'VALID') && ...
@@ -108,7 +113,7 @@ obs=struct('noise_transform',noise_transform,'predicted',h,'residual',residual,'
     'units',{m.units},'frame_id',m.frame_id,'t_start',a.t,'t_end',b.t, ...
     't_received',m.t_received,'source',m.source,'lineage',{m.lineage}, ...
     'noise_model',m.noise_model,'correlation_group',m.correlation_group);
-obs=attach_dependence(obs,m);
+obs=attach_dependence(obs,m); obs=attach_time(obs,a,b,m);
 end
 
 function obs=attach_dependence(obs,m)
@@ -119,4 +124,31 @@ if isfield(m,'state_noise_cov')
         'libekf:Correlation','Camera cross covariance must cover both epoch errors.');
     obs.state_noise_cov=U*obs.noise_transform.';
 end
+end
+
+function obs=attach_time(obs,a,b,m)
+names={'time_covariance','time_independent','time_linearization'};
+if ~any(isfield(m,names)), return; end
+assert(all(isfield(m,names))&&isequal(m.time_independent,true), ...
+    'libekf:Correlation','Time errors must be independent of state and original observation noise.');
+C=m.time_covariance; timing=m.time_linearization;
+assert(isnumeric(C)&&isreal(C)&&isequal(size(C),[2 2])&&all(isfinite(C(:)))&& ...
+    norm(C-C.','fro')<=1e-12*max(norm(C,'fro'),realmin)&&all(diag(C)>=0), ...
+    'libekf:Covariance','Expected covariance of two image times in seconds squared.');
+scale=sqrt(diag(C)); zero=scale==0;
+assert(~any(any(C(zero,:)~=0)),'libekf:Covariance','Impossible time covariance.');
+normalized=(C(~zero,~zero)./scale(~zero))./scale(~zero).';
+assert(isempty(normalized)||min(eig((normalized+normalized.')/2))>=-1e-12, ...
+    'libekf:Covariance','Indefinite time covariance.');
+assert(isstruct(timing)&&isscalar(timing)&&all(isfield(timing, ...
+    {'body_rates','epochs','unit','reference','valid'}))&&isequal(timing.valid,true)&& ...
+    strcmp(timing.unit,'rad/s')&&strcmp(timing.reference,'earth')&& ...
+    isnumeric(timing.epochs)&&isequal(timing.epochs(:),[a.t;b.t])&& ...
+    isnumeric(timing.body_rates)&&isreal(timing.body_rates)&&isequal(size(timing.body_rates),[3 2])&& ...
+    all(isfinite(timing.body_rates(:))), 'libekf:Time','Valid Earth-relative body rates at both image epochs required.');
+% H уже учитывает ориентацию камеры, плечо установки и выбранные компоненты наблюдения.
+rates=zeros(42,2); rates(1:3,1)=a.v(:); rates(7:9,1)=timing.body_rates(:,1);
+rates(22:24,2)=b.v(:); rates(28:30,2)=timing.body_rates(:,2);
+obs.time_jacobian=obs.H*rates;
+obs.R=obs.R+obs.time_jacobian*C*obs.time_jacobian.'; obs.R=(obs.R+obs.R.')/2;
 end
