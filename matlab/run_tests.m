@@ -274,6 +274,8 @@ cases={ ...
     'magnetic_vector',{'field_valid','calibration_valid','field_gradient','field_radius','field_time','field_origin','field_vector'}; ...
     'rsdn_time_difference',{'geometry_at_epoch','stations','propagation_speed','time_correction','reference_station'}; ...
     'doppler_velocity',{'beams_body','surface_valid','beam_geometry_valid','surface_velocity'}; ...
+    'doppler_frequency',{'beams_body','surface_valid','beam_geometry_valid','surface_velocity', ...
+        'wavelength','frequency_sign','frequency_correction','monostatic','calibration_valid'}; ...
     'adf_bearing',{'bearing_geometry_valid','station','bearing_offset'}; ...
     'station_range_azimuth',{'basis','station','azimuth_offset'}; ...
     'time_difference',{'geometry_at_epoch','station','reference_station','range_correction','propagation_speed'}};
@@ -533,6 +535,36 @@ s.q=[cos(pi/4);0;0;sin(pi/4)];
 close(nav_measurement(s,m,e).predicted,[-1;-7;-9]/sqrt(2),1e-12);
 bad=m; bad.surface_valid=false;
 fails(@()nav_measurement(s,bad,e),'libekf:Doppler');
+% Частота отражённого сигнала: знак, удвоенный путь и эквивалентность единиц.
+s.q=[1;0;0;0]; s.v=[3;4;5];
+frequency=packet(s,'doppler_frequency'); frequency.lever=zeros(3,1);
+frequency.beams_body=eye(3); frequency.surface_velocity=zeros(3,1);
+frequency.wavelength=.5; frequency.frequency_correction=[1;2;3];
+frequency.z=[13;18;23]; frequency.R=[4 1 0;1 9 2;0 2 16];
+obs=nav_measurement(s,frequency,e);
+close(obs.predicted,[13;18;23],1e-12); close(obs.H(:,4:6),4*eye(3),1e-12);
+frequency.frequency_sign=-1;
+close(nav_measurement(s,frequency,e).predicted,[-11;-14;-17],1e-12);
+frequency.frequency_sign=1;
+frequency.z=frequency.z+[2;-3;1];
+velocity=frequency; velocity.model='doppler_velocity';
+velocity.z=(frequency.z-frequency.frequency_correction)/4;
+velocity.R=frequency.R/16; velocity.units=repmat({'m/s'},3,1);
+frequency.noise_model='joint_required'; velocity.noise_model='joint_required';
+velocity.state_noise_cov=zeros(21,3); velocity.state_noise_cov(4:6,:)=.01*eye(3);
+frequency.state_noise_cov=4*velocity.state_noise_cov;
+frequency.state_noise_frame_id=s.frame_id; velocity.state_noise_frame_id=s.frame_id;
+[sa,Pa,ia]=nav_correct(s,eye(21),nav_measurement(s,frequency,e),100);
+[sb,Pb,ib]=nav_correct(s,eye(21),nav_measurement(s,velocity,e),100);
+assert(ia.accepted&&ib.accepted); close(sa.v,sb.v,1e-12); close(Pa,Pb,1e-12);
+for field={'monostatic','calibration_valid'}
+    bad=frequency; bad.(field{1})=false;
+    fails(@()nav_measurement(s,bad,e),'libekf:Doppler');
+end
+bad=frequency; bad.wavelength=0;
+fails(@()nav_measurement(s,bad,e),'libekf:Doppler');
+bad=frequency; bad.frequency_sign=0;
+fails(@()nav_measurement(s,bad,e),'libekf:Doppler');
 s.v=[3;4;0]; s.wind=zeros(3,1);
 
 % Known 90-degree body-to-ECEF rotation and antenna kinematics.
@@ -650,10 +682,16 @@ switch model
         end
     case 'baro_height'
         m.geoid_offset=20; m.z=1000; m.R=4; m.units={'m'};
-    case 'doppler_velocity'
+    case {'doppler_velocity','doppler_frequency'}
         m.beams_body=[1 0 -1;0 1 -1;-1 0 -1]/sqrt(2);
         m.surface_velocity=[1;0;0]; m.surface_valid=true; m.beam_geometry_valid=true;
         m.z=[-3;-1;-7]/sqrt(2); m.R=eye(3); m.units=repmat({'m/s'},3,1);
+        if strcmp(model,'doppler_frequency')
+            m.wavelength=.03; m.frequency_sign=1; m.frequency_correction=[1;2;3];
+            m.monostatic=true; m.calibration_valid=true;
+            m.z=(2/m.wavelength)*m.z+m.frequency_correction;
+            m.R=(2/m.wavelength)^2*m.R; m.units=repmat({'Hz'},3,1);
+        end
     case 'airdata'
         m.z=[100;0;0]; m.R=diag([1 .001 .001]); m.units={'m/s';'rad';'rad'};
     case {'radar_range','radar_footprint'}
@@ -2091,7 +2129,7 @@ function models=source_models
 models={'gnss_position','external_position','gnss_velocity','external_velocity', ...
     'gnss_position_velocity','external_position_velocity','dme_range','pseudorange', ...
     'range_rate','vor_azimuth','baro_height','airdata','radar_range','ils_angles', ...
-    'gls_deviation','attitude','radar_footprint','doppler_velocity', ...
+    'gls_deviation','attitude','radar_footprint','doppler_velocity','doppler_frequency', ...
     'adf_bearing','station_range_azimuth','range_difference','time_difference','rsdn_time_difference','magnetic_vector','optical_landmarks','celestial_pixels','cooperative_range','static_pressure','impact_pressure','air_pressures'};
 end
 

@@ -35,7 +35,7 @@ Jp=zeros(3,21); Jp(:,1:3)=eye(3); Jp(:,7:9)=-C*nav_skew(lever);
 switch m.model
     case {'gnss_position','external_position'}
         h=ps; H=Jp; units=repmat({'m'},3,1);
-    case {'gnss_velocity','external_velocity','gnss_position_velocity','external_position_velocity','range_rate','doppler_velocity'}
+    case {'gnss_velocity','external_velocity','gnss_position_velocity','external_position_velocity','range_rate','doppler_velocity','doppler_frequency'}
         if norm(lever)>0
             assert(isfield(m,'omega_ib') && isfield(env,'Omega'), 'libekf:Lever','Nonzero lever needs body rates and Earth rate.');
             omega=vector3(m.omega_ib)-s.bg(:); Omega=vector3(env.Omega);
@@ -47,7 +47,7 @@ switch m.model
         Jv=zeros(3,21); Jv(:,4:6)=eye(3);
         Jv(:,7:9)=-C*nav_skew(rot)+nav_skew(Omega)*C*nav_skew(lever);
         Jv(:,13:15)=C*nav_skew(lever);
-        if strcmp(m.model,'doppler_velocity')
+        if any(strcmp(m.model,{'doppler_velocity','doppler_frequency'}))
             require_fields(m,{'beams_body','surface_valid','beam_geometry_valid','surface_velocity'});
             beams=m.beams_body;
             assert(size(beams,2)==3 && size(beams,1)>0 && all(isfinite(beams(:))) && ...
@@ -58,6 +58,20 @@ switch m.model
             h=beams*vb; H=beams*C.'*Jv;
             H(:,7:9)=H(:,7:9)+beams*nav_skew(vb);
             units=repmat({'m/s'},size(beams,1),1);
+            if strcmp(m.model,'doppler_frequency')
+                require_fields(m,{'wavelength','frequency_sign','frequency_correction', ...
+                    'monostatic','calibration_valid'});
+                wavelength=m.wavelength; sign=m.frequency_sign; correction=m.frequency_correction(:);
+                assert(isnumeric(wavelength)&&isreal(wavelength)&&isscalar(wavelength)&& ...
+                    isfinite(wavelength)&&wavelength>0&&isnumeric(sign)&&isreal(sign)&& ...
+                    isscalar(sign)&&any(sign==[-1 1])&&isnumeric(correction)&&isreal(correction)&& ...
+                    numel(correction)==size(beams,1)&&all(isfinite(correction))&& ...
+                    isequal(m.monostatic,true)&&isequal(m.calibration_valid,true), ...
+                    'libekf:Doppler','Invalid wavelength, frequency convention or calibration.');
+                scale=2*sign/wavelength;
+                h=scale*h+correction; H=scale*H;
+                units=repmat({'Hz'},size(beams,1),1);
+            end
         elseif strcmp(m.model,'range_rate')
             require_fields(m,{'station','station_velocity','rate_correction','geometry_at_epoch'});
             assert(isfield(m,'geometry_at_epoch') && isequal(m.geometry_at_epoch,true), ...
