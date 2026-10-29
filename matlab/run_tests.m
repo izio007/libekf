@@ -1630,6 +1630,41 @@ before=rng; motion=nav_visual_motion(pair,calibration.intrinsics,limits); after=
 assert(isequal(before,after)&&motion.geometry_ready&&strcmp(motion.quality,'UNASSESSED'));
 close(motion.rotation,Rtrue,1e-5); close(motion.direction,shift/norm(shift),1e-5);
 assert(~motion.scale_known&&~isfield(motion,'R'));
+% Полная погрешность сохраняет связи направления и поворота и масштаб входного шума.
+limits.rank_tolerance=1e-10; C=speye(4*size(pair.first,1))*.04;
+uncertain=nav_visual_motion(pair,calibration.intrinsics,limits,C);
+local=uncertain.local_error;
+assert(local.rank==5&&strcmp(local.quality,'LOCAL_LINEAR')&&isequal(size(local.covariance),[5 5]));
+assert(norm(local.covariance(1:2,3:5),'fro')>0&&all(eig(local.covariance)>0));
+scaled=nav_visual_motion(pair,calibration.intrinsics,limits,4*C);
+close(scaled.local_error.covariance,4*local.covariance,1e-10);
+common=zeros(size(C,1),1); common(2:4:end)=1;
+dependent=nav_visual_motion(pair,calibration.intrinsics,limits,C+.01*(common*common.'));
+assert(min(eig(dependent.local_error.covariance-local.covariance))>=-1e-10);
+% Якобианы проверяются по независимому пересчёту эпиполярного ограничения.
+chosen=uncertain.fitting_indices; a=K\[pair.first(chosen,:).';ones(1,numel(chosen))];
+b=K\[pair.second(chosen,:).';ones(1,numel(chosen))];
+R=uncertain.rotation; d=uncertain.direction; B=local.tangent_basis; h=1e-6;
+for j=1:5
+    dp=d; dm=d; Rp=R; Rm=R;
+    if j<=2
+        dp=d+h*B(:,j); dp=dp/norm(dp); dm=d-h*B(:,j); dm=dm/norm(dm);
+    else
+        delta=zeros(3,1); delta(j-2)=h;
+        Rp=R*expm(nav_skew(delta)); Rm=R*expm(-nav_skew(delta));
+    end
+    fp=sum(b.*(Rp.'*nav_skew(dp)*a),1).'; fm=sum(b.*(Rm.'*nav_skew(dm)*a),1).';
+    close((fp-fm)/(2*h),local.state_jacobian(:,j),1e-8);
+end
+for j=1:4
+    x=pair.first(chosen(1),:); y=pair.second(chosen(1),:); xp=x; xm=x; yp=y; ym=y;
+    if j<=2, xp(j)=xp(j)+h; xm(j)=xm(j)-h;
+    else, yp(j-2)=yp(j-2)+h; ym(j-2)=ym(j-2)-h; end
+    E=R.'*nav_skew(d);
+    fp=(K\[yp.';1]).'*E*(K\[xp.';1]); fm=(K\[ym.';1]).'*E*(K\[xm.';1]);
+    close((fp-fm)/(2*h),full(local.pixel_jacobian(1,j)),1e-8);
+end
+
 bad_pair=pair; bad_pair.t_received=pair.t_start;
 fails(@()nav_visual_motion(bad_pair,calibration.intrinsics,limits),'libekf:Time');
 bad_pair=pair; bad_pair.lineage={'repeated','repeated'};

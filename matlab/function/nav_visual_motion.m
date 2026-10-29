@@ -1,4 +1,4 @@
-function result=nav_visual_motion(matches,camera,limits)
+function result=nav_visual_motion(matches,camera,limits,pixel_covariance)
 % Кандидат относительного движения по исправленным пиксельным соответствиям.
 % Масштаб и ковариация движения здесь не определяются; поправка фильтра не выдаётся.
 assert(isstruct(matches)&&isscalar(matches)&&all(isfield(matches, ...
@@ -37,7 +37,8 @@ intrinsics=cameraIntrinsics(camera.FocalLength,camera.PrincipalPoint,camera.Imag
 result=struct('source',matches.source,'lineage',{matches.lineage}, ...
     't_start',matches.t_start,'t_end',matches.t_end,'t_received',matches.t_received, ...
     'quality','INSUFFICIENT','scale_known',false,'geometry_ready',false, ...
-    'rotation',[],'direction',[],'checking_errors',[],'checking_support',0,'front_fraction',0);
+    'rotation',[],'direction',[],'checking_errors',[],'checking_support',0,'front_fraction',0, ...
+    'fitting_indices',[]);
 % Альтернативы используют то же исходное разделение, без отбора по основной модели.
 result.ambiguity=nav_visual_ambiguity(matches.first,matches.second,K,matches.training,limits.ambiguity);
 if strcmp(result.ambiguity.status,'AMBIGUOUS'), result.quality='AMBIGUOUS'; end
@@ -46,7 +47,7 @@ saved=rng; cleanup=onCleanup(@()rng(saved)); rng(limits.seed,'twister'); %#ok<NA
 [E,inliers,status]=estimateEssentialMatrix(matches.first(fit,:),matches.second(fit,:),intrinsics, ...
     'MaxNumTrials',limits.trials,'Confidence',limits.confidence,'MaxDistance',limits.fit_distance);
 if status~=0||nnz(inliers)<8, return; end
-chosen=fit(inliers);
+chosen=fit(inliers); result.fitting_indices=chosen;
 [pose,fraction]=estrelpose(E,intrinsics,matches.first(chosen,:),matches.second(chosen,:));
 if numel(pose)~=1||~isfinite(fraction)||norm(pose.Translation)==0, return; end
 result.rotation=pose.R;
@@ -67,4 +68,50 @@ end
 result.geometry_ready=result.ambiguity.geometry_ready&&fraction>=limits.min_front_fraction&& ...
     result.checking_support>=limits.min_check_support;
 if result.geometry_ready, result.quality='UNASSESSED'; end
+if nargin>=4&&result.geometry_ready
+    assert(isfield(limits,'rank_tolerance')&&isscalar(limits.rank_tolerance)&& ...
+        isreal(limits.rank_tolerance)&&isfinite(limits.rank_tolerance)&& ...
+        limits.rank_tolerance>0&&limits.rank_tolerance<1, ...
+        'libekf:Vision','Explicit local rank tolerance required.');
+    count=size(matches.first,1);
+    assert(isnumeric(pixel_covariance)&&isreal(pixel_covariance)&& ...
+        isequal(size(pixel_covariance),[4*count 4*count])&&all(isfinite(pixel_covariance(:)))&& ...
+        norm(pixel_covariance-pixel_covariance.','fro')<=1e-12*max(norm(pixel_covariance,'fro'),realmin)&& ...
+        all(diag(pixel_covariance)>0), 'libekf:Covariance','Expected full pixel covariance.');
+    d=sqrt(diag(pixel_covariance)); D=spdiags(1./d,0,4*count,4*count);
+    [~,flag]=chol(D*pixel_covariance*D);
+    assert(flag==0,'libekf:Covariance','Pixel covariance must be positive definite.');
+    indices=reshape((4*(chosen(:)-1)+(1:4)).',[],1);
+    result.local_error=local_error(matches.first(chosen,:),matches.second(chosen,:), ...
+        K,result.rotation,result.direction,pixel_covariance(indices,indices),limits.rank_tolerance);
+end
+end
+
+function out=local_error(first,second,K,R,d,C,tolerance)
+% Линеаризованная взвешенная модель, условная по выбранным соответствиям.
+% Порядок пикселей: x1,y1,x2,y2 для каждой пары; параметры: две компоненты направления, три поворота.
+[~,axis]=min(abs(d)); unit=zeros(3,1); unit(axis)=1;
+v=cross(d,unit); v=v/norm(v); B=[v cross(d,v)];
+E=R.'*nav_skew(d); n=size(first,1);
+a=K\[first.';ones(1,n)]; b=K\[second.';ones(1,n)];
+pixel_map=K\[eye(2);zeros(1,2)];
+J=zeros(n,5); G=sparse(n,4*n); axes=eye(3);
+for k=1:n
+    for j=1:2, J(k,j)=b(:,k).'*R.'*nav_skew(B(:,j))*a(:,k); end
+    for j=1:3, J(k,j+2)=-b(:,k).'*nav_skew(axes(:,j))*E*a(:,k); end
+    G(k,4*k-3:4*k)=[b(:,k).'*E*pixel_map a(:,k).'*E.'*pixel_map];
+end
+V=full(G*C*G.'); V=(V+V.')/2;
+scale=sqrt(diag(V)); normalized=(V./scale)./scale.';
+[L,flag]=chol(normalized,'lower');
+assert(flag==0&&all(isfinite(scale)&scale>0),'libekf:Covariance','Singular epipolar noise.');
+A=L\(J./scale); [~,S,W]=svd(A,'econ'); singular=diag(S);
+rank=sum(singular>max(tolerance,100*eps*max(size(A)))*max(singular));
+out=struct('rank',rank,'tangent_basis',B,'state_jacobian',J,'pixel_jacobian',G, ...
+    'singular_values',singular,'covariance',[],'quality','UNOBSERVABLE');
+if rank==5
+    factor=W./singular.'; covariance=factor*factor.';
+    out.covariance=(covariance+covariance.')/2;
+    out.quality='LOCAL_LINEAR';
+end
 end
