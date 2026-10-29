@@ -3551,6 +3551,26 @@ assert(isequal(selected.lineage,interpolated.lineage)&&size(selected.input_trans
 close(selected.input_transform,interpolated.input_transform,1e-12);
 close(selected.covariance,interpolated.covariance,1e-12);
 
+% Смещение интерполяции вычитается, а общие ошибки сохраняются после подготовки.
+dependent=sampled;
+dependent.interpolation_error.mean([1 12])=[.1;.01];
+dependent.interpolation_error.state_cross_cov(1,1)=1e-6;
+dependent.interpolation_error.sample_cross_cov(1,1)=1e-6;
+actual=nav_inertial_camera_motion({first,second},P,dependent,environment,interpolation_limits);
+corrected=exact; corrected.accel(1,1)=corrected.accel(1,1)-.1;
+corrected.gyro(3,2)=corrected.gyro(3,2)-.01;
+% Первый исходный отсчёт входит с весом 1/2: два взаимных члена дают 1e-6.
+corrected.covariance(1,1)=corrected.covariance(1,1)+1e-6;
+corrected.state_noise_cov(1,1)=1e-6;
+reference=nav_inertial_camera_motion({first,second},P,corrected,environment,validity);
+close(actual.motion.acceleration,reference.motion.acceleration,1e-12);
+close(actual.motion.body_rates,reference.motion.body_rates,1e-12);
+close(actual.covariance,reference.covariance,1e-12);
+close(actual.state_noise_cov,reference.state_noise_cov,1e-12);
+close(actual.motion.acceleration(1,1),interpolated.motion.acceleration(1,1)-.1,1e-12);
+close(actual.motion.body_rates(3,2),interpolated.motion.body_rates(3,2)-.01,1e-12);
+assert(abs(actual.state_noise_cov(1,7)-interpolated.state_noise_cov(1,7)-1e-6)<1e-12);
+
 bad=sampled; bad.t_received=second.t;
 fails(@()nav_inertial_camera_motion({first,second},P,bad,environment,interpolation_limits),'libekf:Time');
 short_gap=interpolation_limits; short_gap.max_sample_gap=.1;
