@@ -2431,11 +2431,11 @@ end
 % Отказ ИНС внутри интервала не допускает продолжения по тем же данным.
 report.target_source=u.source; report.t_measure=mid.t;
 [unchanged,info]=nav_assimilate_interval(f,u,{report},{[]},e,1e8);
-assert(~info.accepted&&strcmp(info.reason,'libekf:SourceHealth')&&isequal(unchanged,f));
+assert(~info.accepted&&strcmp(info.reason,'libekf:SourceHealth')&&isequal(unchanged,f)&&isempty(info.steps));
 report.target_source='accelerometer';
 dependent_imu=u; dependent_imu.input_sources={'accelerometer','gyroscope'};
 [unchanged,info]=nav_assimilate_interval(f,dependent_imu,{report},{[]},e,1e8);
-assert(~info.accepted&&strcmp(info.reason,'libekf:SourceHealth')&&isequal(unchanged,f));
+assert(~info.accepted&&strcmp(info.reason,'libekf:SourceHealth')&&isequal(unchanged,f)&&isempty(info.steps));
 models=source_models;
 for k=1:numel(models)
     m=packet(mid,models{k}); m.frame='SENSOR_LOCAL'; m.t_received=u.t_end+1;
@@ -2443,6 +2443,21 @@ for k=1:numel(models)
     [reference,info]=nav_assimilate(at_measurement,m,sensor,e,1e8);
     assert(info.accepted,'libekf:Timing','Reference %s rejected: %s',models{k},info.reason);
     [reference.state,reference.P]=nav_predict(reference.state,reference.P,second,e);
+    % История принятого интервала сохраняет хронологию и воспроизводит погрешность.
+    [interval,trace]=nav_assimilate_interval(f,u,{m},{sensor},e,1e8);
+    assert(trace.accepted&&numel(trace.steps)==3);
+    a=trace.steps{1}.data; b=trace.steps{2}.data; c=trace.steps{3}.data;
+    assert(strcmp(trace.steps{1}.kind,'propagation')&&trace.steps{2}.packet_index==1);
+    assert(a.t_start==s.t&&a.t_end==mid.t&&c.t_start==mid.t&&c.t_end==u.t_end);
+    prior=a.transition*f.P*a.transition.'+a.process_covariance;
+    [~,posterior]=nav_correct(mid,prior,b.observation,1e8);
+    close(interval.P,c.transition*posterior*c.transition.'+c.process_covariance,1e-10);
+    close(interval.P,reference.P,1e-10);
+    bad=m; bad.quality='FAILED';
+    [~,trace]=nav_assimilate_interval(f,u,{bad},{sensor},e,1e8);
+    assert(trace.accepted&&numel(trace.steps)==1);
+    assert(trace.steps{1}.data.t_start==s.t&&trace.steps{1}.data.t_end==u.t_end);
+
     [replayed,info]=nav_replay(f,{u},{m},{sensor},e,1e8);
     assert(info.accepted&&info.observations{1}.accepted,'libekf:Timing', ...
         'Delayed %s rejected',models{k});
