@@ -3180,6 +3180,16 @@ assert(isequal(relative,nav_time_from_ticks(ticks+offset,origin+offset,1e-9)));
 assert(isequal(relative.',nav_time_from_ticks(ticks.',origin,1e-9)));
 last=intmax('uint64');
 close(nav_time_from_ticks([last-uint64(1),last],last,1e-9),[-1e-9 0],1e-24);
+% Исходные десятичные строки читаются без промежуточного округления double.
+close(nav_time_from_ticks({'18446744073709551614','18446744073709551615'}, ...
+    '18446744073709551615',1e-9),[-1e-9 0],1e-24);
+close(nav_time_from_ticks(["1152921504606846979";"1152921504606846980"], ...
+    "1152921504606846979",1e-9),[0;1e-9],1e-24);
+assert(nav_time_from_ticks('0001','1',1)==0);
+fails(@()nav_time_from_ticks('18446744073709551616','0',1),'libekf:TimePrecision');
+for malformed={'','-1','+1','1.0','1e3',' 1','1 ','NaN'}
+    fails(@()nav_time_from_ticks(malformed{1},'0',1),'libekf:Time');
+end
 fails(@()nav_time_from_ticks(double(ticks),origin,1e-9),'libekf:Time');
 fails(@()nav_time_from_ticks(last,uint64(0),1e-9),'libekf:TimePrecision');
 fails(@()nav_time_from_ticks(uint64(flintmax),uint64(0),1e-9),'libekf:TimePrecision');
