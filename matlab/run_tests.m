@@ -1812,10 +1812,24 @@ for k=1:numel(models)
     independent=m; independent.source='other_source';
     [~,info]=nav_replay(f,{u},{report,independent},{[],sensor},e,1e8);
     assert(info.accepted&&all(cellfun(@(x)x.accepted,info.observations)));
+    % Имя вычислителя не скрывает отказ прибора, данные которого он использует.
+    dependent=independent; dependent.input_sources={m.source,'healthy_auxiliary'};
+    [rejected,info]=nav_replay(f,{u},{report,dependent},{[],sensor},e,1e8);
+    assert(info.accepted&&~info.observations{2}.accepted&&isequal(rejected,blocked));
+    [~,info]=nav_replay(f,{u},{report,restored,dependent},{[],[],sensor},e,1e8);
+    assert(info.accepted&&all(cellfun(@(x)x.accepted,info.observations)));
+    invalid=independent; invalid.input_sources={''};
+    at_measurement=f; at_measurement.state=mid; at_measurement.P=midP;
+    [unchanged,info]=nav_assimilate(at_measurement,invalid,sensor,e,1e8);
+    assert(~info.accepted&&isequal(unchanged,at_measurement));
 end
 % Отказ ИНС внутри интервала не допускает продолжения по тем же данным.
 report.target_source=u.source; report.t_measure=mid.t;
 [unchanged,info]=nav_assimilate_interval(f,u,{report},{[]},e,1e8);
+assert(~info.accepted&&strcmp(info.reason,'libekf:SourceHealth')&&isequal(unchanged,f));
+report.target_source='accelerometer';
+dependent_imu=u; dependent_imu.input_sources={'accelerometer','gyroscope'};
+[unchanged,info]=nav_assimilate_interval(f,dependent_imu,{report},{[]},e,1e8);
 assert(~info.accepted&&strcmp(info.reason,'libekf:SourceHealth')&&isequal(unchanged,f));
 models=source_models;
 for k=1:numel(models)

@@ -58,6 +58,13 @@ try
         'libekf:SourceHealth','Invalid excluded source list.');
     assert(~isfield(packet,'source')||~any(strcmp(excluded,packet.source)), ...
         'libekf:SourceHealth','Source excluded by a diagnostic report.');
+    if isfield(packet,'input_sources')
+        dependencies=packet.input_sources;
+        assert(iscell(dependencies)&&all(cellfun(@(x)ischar(x)&&isrow(x)&&~isempty(x),dependencies)), ...
+            'libekf:SourceHealth','Invalid input source identities.');
+        assert(~any(ismember(dependencies(:),excluded(:))), ...
+            'libekf:SourceHealth','Observation depends on an excluded source.');
+    end
     assert(~inertial||~isfield(packet,'retained_reference'),'libekf:Peer', ...
         'Retained reference correction is not an inertial propagation model.');
     stored_bank=isfield(filter,'reference_bank');
