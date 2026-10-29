@@ -24,6 +24,10 @@ end
 if isfield(filter,'future_noise')&&~isequal(imu.future_noise_independent,true)
     result.reason='libekf:Correlation'; return; % Для разбиения нужна временная модель общего шума.
 end
+if isfield(filter,'future_noise')&&isfield(filter.future_noise,'peer_cross_cov')&& ...
+        ~isequal(imu.reference_motion.future_noise_independent,true)
+    result.reason='libekf:Correlation'; return; % Связь за целый интервал нельзя копировать на его части.
+end
 if isfield(filter,'reference_bank')&&~isfield(imu.reference_motion,'F')
     result.reason='libekf:ReferenceInterval'; return;
 end

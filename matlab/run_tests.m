@@ -1420,6 +1420,31 @@ close(split.reference_bank.covariance,joint_advanced.reference_bank.covariance,1
 assert(split.future_noise.peer_time==imu.t_end);
 [replayed,trace]=nav_replay(snapshot,{joint_imu},{event},{[]},motion,100);
 assert(trace.accepted); close(replayed.future_noise.peer_cross_cov,split.future_noise.peer_cross_cov,0);
+% Новая ошибка движения опоры может быть связана с сохранённой калибровкой.
+correlated_imu=joint_imu; correlated_imu.reference_motion.future_noise_independent=false;
+correlated_imu.reference_motion.future_noise_cross_cov=[.01;0;0];
+[correlated,accepted]=nav_assimilate(snapshot,correlated_imu,[],motion,100);
+assert(accepted.accepted);
+close(correlated.future_noise.peer_cross_cov, ...
+    joint_advanced.future_noise.peer_cross_cov+[.01;0;0],1e-12);
+close(correlated.reference_bank.covariance,joint_advanced.reference_bank.covariance,1e-12);
+[whole,accepted]=nav_assimilate_interval(snapshot,correlated_imu,{}, {},motion,100);
+assert(accepted.accepted); close(whole.future_noise.peer_cross_cov,correlated.future_noise.peer_cross_cov,0);
+[unchanged,rejected]=nav_assimilate_interval(snapshot,correlated_imu,{event},{[]},motion,100);
+assert(~rejected.accepted&&isequal(unchanged,snapshot)&&isempty(rejected.steps));
+impossible=correlated_imu; impossible.reference_motion.future_noise_cross_cov=[10;0;0];
+[unchanged,rejected]=nav_assimilate(snapshot,impossible,[],motion,100);
+assert(~rejected.accepted&&isequal(unchanged,snapshot));
+contradictory=correlated_imu; contradictory.reference_motion.future_noise_independent=true;
+[unchanged,rejected]=nav_assimilate(snapshot,contradictory,[],motion,100);
+assert(~rejected.accepted&&isequal(unchanged,snapshot));
+missing=correlated_imu; missing.reference_motion=rmfield(missing.reference_motion,'future_noise_cross_cov');
+[unchanged,rejected]=nav_assimilate(snapshot,missing,[],motion,100);
+assert(~rejected.accepted&&isequal(unchanged,snapshot));
+[~,~,~,~,changed_motion]=nav_change_frame(snapshot.state,snapshot.P,e,to, ...
+    snapshot.reference_bank,correlated_imu.reference_motion);
+close(changed_motion.future_noise_cross_cov,to.C_e_l.'*e.C_e_l*[.01;0;0],1e-12);
+
 invalid=joint_imu; invalid.reference_motion=rmfield(invalid.reference_motion,'future_noise_independent');
 [unchanged,rejected]=nav_assimilate(snapshot,invalid,[],motion,100);
 assert(~rejected.accepted&&isequal(unchanged,snapshot));

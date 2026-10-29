@@ -1,4 +1,4 @@
-function [out,A]=nav_predict_reference(reference,T,model)
+function [out,A,N]=nav_predict_reference(reference,T,model)
 % Перенос положения опоры и его связи с навигационными ошибками в тех же осях.
 % model: A, shift (м), Q (м²), t_start/t_end (с), frame_id, noise_independent.
 assert(isstruct(reference)&&isscalar(reference)&& ...

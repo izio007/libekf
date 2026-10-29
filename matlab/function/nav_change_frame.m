@@ -121,6 +121,12 @@ assert(isequal(size(M),[d d])&&isreal(M)&&all(isfinite(M(:)))&& ...
 K=kron(eye(d/3),to.C_e_l.'*from.C_e_l);
 b=repmat(to.C_e_l.'*(from.origin_ecef(:)-to.origin_ecef(:)),d/3,1);
 out=model; out.frame_id=to.frame_id;
+if isfield(model,'future_noise_cross_cov')
+    E=model.future_noise_cross_cov;
+    assert(isnumeric(E)&&isreal(E)&&size(E,1)==d&&all(isfinite(E(:))), ...
+        'libekf:Correlation','Invalid reference-process/future-error covariance.');
+    out.future_noise_cross_cov=K*E;
+end
 out.(fields{1})=K*M*K.'; out.(fields{3})=K*N*K.';
 out.(fields{2})=K*v-out.(fields{1})*b;
 if ~isfield(model,'F'), out.shift=out.shift+b; end
