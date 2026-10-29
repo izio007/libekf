@@ -837,6 +837,60 @@ close(filter.state.p,batch.p,1e-8); close(filter.P,B,1e-8);
 [same,r2]=nav_assimilate(filter,m,sensor,e,100);
 assert(~r2.accepted&&~isfield(r2,'peer_update')&&isequal(same,filter));
 
+% A new independent position observation also conditions the correlated reference.
+retained=first_info.peer_update; retained.noise_independent=true;
+position=packet(s,'gnss_position'); position.lever=zeros(3,1); position.z=s.p+[1;0;0];
+position.R=eye(3); position_obs=nav_measurement(s,position,e);
+prior=eye(21); prior(1,1)=20/7;
+[corrected,posterior,other]=nav_correct(s,prior,position_obs,100,retained);
+assert(other.accepted); close(corrected.p,s.p+[20/27;0;0],1e-12);
+close(posterior(1,1),20/27,1e-12);
+close(other.peer_update.position,retained.position+[2/3;0;0],1e-12);
+close(other.peer_update.covariance(1,1),3/2,1e-12);
+close(other.peer_update.cross_cov(1,1),2/3,1e-12);
+bad_retained=retained; bad_retained.noise_independent=false;
+fails(@()nav_correct(s,prior,position_obs,100,bad_retained),'libekf:Correlation');
+bad_retained=retained; bad_retained.t=s.t-1;
+fails(@()nav_correct(s,prior,position_obs,100,bad_retained),'libekf:Epoch');
+
+% Prepared retained-reference updates use the same accepted/rejected packet path.
+position.frame='SENSOR_LOCAL'; position.retained_reference=retained;
+sensor=struct('id',s.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
+filter=struct('state',s,'P',prior,'used',{{}},'capacity',10);
+[next,accepted]=nav_assimilate(filter,position,sensor,e,100);
+assert(accepted.accepted); close(next.state.p,corrected.p,1e-12); close(next.P,posterior,1e-12);
+close(accepted.peer_update.position,other.peer_update.position,1e-12);
+close(accepted.peer_update.cross_cov,other.peer_update.cross_cov,1e-12);
+[same,repeated]=nav_assimilate(next,position,sensor,e,100);
+assert(~repeated.accepted&&isequal(same,next)&&~isfield(repeated,'peer_update'));
+position.retained_reference.t=s.t-1;
+[same,rejected]=nav_assimilate(filter,position,sensor,e,100);
+assert(~rejected.accepted&&strcmp(rejected.reason,'libekf:Epoch')&& ...
+    isequal(same,filter)&&~isfield(rejected,'peer_update'));
+
+% Reference error is propagated jointly, not reset at the next epoch.
+transition=eye(21); transition(1,4)=2;
+retained.cross_cov(4,1)=.1;
+motion=struct('A',eye(3),'shift',zeros(3,1),'Q',zeros(3), ...
+    't_start',retained.t,'t_end',retained.t+2,'frame_id',retained.frame_id,'noise_independent',true);
+propagated=nav_predict_reference(retained,transition,motion);
+close(propagated.position,retained.position,0); close(propagated.covariance,retained.covariance,0);
+close(propagated.cross_cov(1,1),retained.cross_cov(1,1)+.2,1e-12);
+assert(propagated.t==motion.t_end&&~isfield(propagated,'noise_independent'));
+motion.A=diag([1 2 1]); motion.shift=[3;0;0]; motion.Q=diag([.5 .2 0]);
+propagated=nav_predict_reference(retained,transition,motion);
+joint=[prior retained.cross_cov;retained.cross_cov.' retained.covariance];
+F=blkdiag(transition,motion.A); expected=F*joint*F.'+blkdiag(zeros(21),motion.Q);
+close(propagated.covariance,expected(22:24,22:24),1e-12);
+close(propagated.cross_cov,expected(1:21,22:24),1e-12);
+close(propagated.position,motion.A*retained.position+[3;0;0],1e-12);
+bad_motion=motion; bad_motion.noise_independent=false;
+fails(@()nav_predict_reference(retained,transition,bad_motion),'libekf:Correlation');
+bad_motion=motion; bad_motion.Q=diag([-1 0 0]);
+fails(@()nav_predict_reference(retained,transition,bad_motion),'libekf:Covariance');
+bad_motion=motion; bad_motion.t_start=retained.t-1;
+fails(@()nav_predict_reference(retained,transition,bad_motion),'libekf:Epoch');
+
 % Impossible peer dependence must be rejected even perpendicular to the measured range.
 [s,e]=fixture; m=packet(s,'cooperative_range'); m.lever=zeros(3,1);
 m.station=s.p+[10;0;0]; m.z=10; m.peer_covariance=eye(3);

@@ -50,6 +50,8 @@ try
     end
     odometry=strcmp(packet.model,'visual_odometry');
     inertial=strcmp(packet.model,'inertial');
+    assert(~inertial||~isfield(packet,'retained_reference'),'libekf:Peer', ...
+        'Retained reference correction is not an inertial propagation model.');
     if inertial
         [candidate,Q,T]=nav_predict(filter.state,filter.P,packet,env);
         if paired
@@ -84,11 +86,13 @@ try
         result.reason='Исчерпана память происхождения измерений'; return;
     end
     if ~inertial
+        retained_args={};
+        if isfield(packet,'retained_reference'), retained_args={packet.retained_reference}; end
         if paired
-            [states,J,info]=nav_correct({reference,filter.state},J,obs,limit);
+            [states,J,info]=nav_correct({reference,filter.state},J,obs,limit,retained_args{:});
             reference=states{1}; candidate=states{2}; Q=J(22:42,22:42);
         else
-            [candidate,Q,info]=nav_correct(filter.state,filter.P,obs,limit);
+            [candidate,Q,info]=nav_correct(filter.state,filter.P,obs,limit,retained_args{:});
         end
         result.nis=info.nis;
         if ~info.accepted
