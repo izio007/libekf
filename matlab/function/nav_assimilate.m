@@ -141,7 +141,7 @@ try
         end
         candidate=filter.state; Q=filter.P; ids=unique(packet.lineage(:));
     elseif inertial
-        [candidate,Q,T]=nav_predict(filter.state,filter.P,packet,env);
+        [candidate,Q,T,N]=nav_predict(filter.state,filter.P,packet,env);
         if paired
             cross=J(1:21,22:42)*T.';
             J=[J(1:21,1:21) cross;cross.' Q];
@@ -244,6 +244,18 @@ try
     if paired, out.reference=reference; out.jointP=J; end
     out.state=candidate; out.P=Q; out.used=[filter.used(:);ids];
     if ~health, out.source_history=source_history; end
+    if inertial
+        transition=T; process_covariance=N;
+        if paired, transition=blkdiag(eye(21),T); process_covariance=blkdiag(zeros(21),N); end
+        result.propagation=struct('transition',transition,'process_covariance',process_covariance, ...
+            't_start',packet.t_start,'t_end',packet.t_end,'frame_id',filter.state.frame_id, ...
+            'source',packet.source,'lineage',{packet.lineage});
+    elseif ~health
+        result.observation=obs;
+        result.error_reset=info.error_reset;
+        result.state_times=filter.state.t;
+        if paired, result.state_times=[filter.reference.t;filter.state.t]; end
+    end
     result.accepted=true; result.reason='Оценка обновлена; достоверность проверяет сторож';
     if health, result.reason='Признак исправности опоры обновлён'; end
     if source_health

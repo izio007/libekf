@@ -172,6 +172,7 @@ for k=1:numel(states)
     G(indices,indices)=eye(3)-b*V+c*(V*V);
 end
 Q=G*Q*G.'; Q=(Q+Q.')/2;
+info.error_reset=G;
 assert(all(isfinite(Q(:))),'libekf:Covariance','Correction covariance overflow.');
 % Совместно уточняем опорный объект, чтобы его ошибка не стала независимой снова.
 if isfield(obs,'peer_jacobian')

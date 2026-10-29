@@ -51,6 +51,16 @@ for k=1:numel(models)
     m=packet(s,models{k}); m.frame='SENSOR_LOCAL';
     [a,ra]=nav_assimilate(f,m,sensor0,e,1e8);
     assert(ra.accepted,'libekf:AllSources','%s rejected: %s',models{k},ra.reason);
+    % История получает именно принятую модель, а не повторную линеаризацию после поправки.
+    model=nav_observe_source(f.state,m,sensor0,e);
+    assert(isequal(ra.observation,model)&&isequal(size(ra.error_reset),[21 21])&&ra.state_times==f.state.t);
+    [same_state,same_P,correction]=nav_correct(f.state,f.P,ra.observation,1e8);
+    close(same_state.p,a.state.p,1e-12); close(same_P,a.P,1e-12);
+    close(correction.error_reset,ra.error_reset,1e-12);
+    bad=m; bad.quality='FAILED';
+    [unchanged,failed]=nav_assimilate(f,bad,sensor0,e,1e8);
+    assert(~failed.accepted&&isequal(unchanged,f)&&~isfield(failed,'observation'));
+
     control=struct('state_time',a.state.t,'frame_id',a.state.frame_id,'now',a.state.t+.5, ...
         'checks',struct(),'source_history',a.source_history,'sources_complete',true);
     published=nav_geodetic_output(a.state,a.P,e,control);
@@ -324,6 +334,9 @@ combined.state_noise_cov(1:3,:)=-.25*eye(3);
 combined.reuse=struct('lineage',{{'conditional_old'}},'history',{conditioned.used}, ...
     'state_times',conditioned.state.t,'noise_mean',[.5;0;0]);
 [actual,info]=nav_assimilate(conditioned,combined,sensor,e,100); assert(info.accepted);
+uncentred=nav_observe_source(conditioned.state,combined,sensor,e);
+close(info.observation.residual,uncentred.residual-combined.reuse.noise_mean,1e-12);
+
 close(actual.state.p,expected.state.p,1e-12); close(actual.P,expected.P,1e-12);
 close(actual.state.p,s.p+[2;0;0],1e-12); close(diag(actual.P(1:3,1:3)),ones(3,1)/3,1e-12);
 assert(numel(actual.used)==2);
@@ -2345,6 +2358,12 @@ first=u; first.t_end=s.t+.0625;
 [mid,midP]=nav_predict(s,f.P,first,e);
 second=u; second.t_start=mid.t;
 [plain,info]=nav_assimilate(f,u,[],e,1e8); assert(info.accepted);
+[~,~,transition,process_noise]=nav_predict(f.state,f.P,u,e);
+close(info.propagation.transition,transition,1e-12);
+close(info.propagation.process_covariance,process_noise,1e-12);
+close(plain.P,transition*f.P*transition.'+process_noise,1e-12);
+assert(info.propagation.t_start==u.t_start&&info.propagation.t_end==u.t_end);
+
 % LEKF-004/020: закрытие истории сохраняет оценку и освобождает только идентификаторы.
 seed=f; seed.used={'initial_record'}; seed.capacity=2; seed.excluded_sources={'failed_device'};
 checkpoint=nav_checkpoint(seed);
