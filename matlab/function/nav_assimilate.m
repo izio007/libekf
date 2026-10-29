@@ -50,6 +50,7 @@ try
     end
     odometry=strcmp(packet.model,'visual_odometry');
     inertial=strcmp(packet.model,'inertial');
+    health=strcmp(packet.model,'reference_health');
     assert(~inertial||~isfield(packet,'retained_reference'),'libekf:Peer', ...
         'Retained reference correction is not an inertial propagation model.');
     stored_bank=isfield(filter,'reference_bank');
@@ -62,7 +63,7 @@ try
         check_bank(bank,prior);
         assert(~isfield(packet,'reference_bank')&&~isfield(packet,'retained_reference'), ...
             'libekf:Peer','Stored reference set cannot be overridden by a packet.');
-        if ~inertial
+        if ~inertial&&~health
             if strcmp(packet.model,'cooperative_range')
                 packet.reference_bank=bank;
             else
@@ -80,7 +81,23 @@ try
             end
         end
     end
-    if inertial
+    if health
+        assert(stored_bank&&all(isfield(packet,{'source','lineage','quality','peer_id','valid', ...
+            't_measure','t_received','frame_id'})), 'libekf:PeerHealth','Incomplete reference health report.');
+        assert(ischar(packet.source)&&~isempty(packet.source)&& ...
+            iscell(packet.lineage)&&~isempty(packet.lineage)&& ...
+            all(cellfun(@(x)ischar(x)&&~isempty(x),packet.lineage))&& ...
+            strcmp(packet.quality,'VALID')&&ischar(packet.peer_id)&& ...
+            islogical(packet.valid)&&isscalar(packet.valid)&&strcmp(packet.frame_id,filter.state.frame_id)&& ...
+            isnumeric(packet.t_measure)&&isscalar(packet.t_measure)&&isreal(packet.t_measure)&& ...
+            packet.t_measure==filter.state.t&&isnumeric(packet.t_received)&& ...
+            isscalar(packet.t_received)&&isreal(packet.t_received)&&isfinite(packet.t_received)&& ...
+            packet.t_received>=packet.t_measure, 'libekf:PeerHealth','Invalid reference health report.');
+        selected=find(strcmp(bank.ids,packet.peer_id));
+        assert(numel(selected)==1,'libekf:PeerHealth','Unknown reference health ID.');
+        bank.valid(selected)=packet.valid;
+        candidate=filter.state; Q=filter.P; ids=unique(packet.lineage(:));
+    elseif inertial
         [candidate,Q,T]=nav_predict(filter.state,filter.P,packet,env);
         if paired
             cross=J(1:21,22:42)*T.';
@@ -119,7 +136,7 @@ try
     if numel(filter.used)+numel(ids)>filter.capacity
         result.reason='Исчерпана память происхождения измерений'; return;
     end
-    if ~inertial
+    if ~inertial&&~health
         retained_args={};
         if isfield(packet,'retained_reference'), retained_args={packet.retained_reference}; end
         if paired
@@ -133,9 +150,9 @@ try
             result.reason='Превышено допустимое расхождение'; return;
         end
     end
-    if ~inertial&&isfield(info,'peer_update'), result.peer_update=info.peer_update; end
+    if ~inertial&&~health&&isfield(info,'peer_update'), result.peer_update=info.peer_update; end
     if stored_bank
-        if ~inertial
+        if ~inertial&&~health
             update=info.peer_update;
             for name={'position','covariance','cross_cov','t','frame_id'}
                 bank.(name{1})=update.(name{1});
@@ -149,6 +166,7 @@ try
     if paired, out.reference=reference; out.jointP=J; end
     out.state=candidate; out.P=Q; out.used=[filter.used(:);ids];
     result.accepted=true; result.reason='Оценка обновлена; достоверность проверяет сторож';
+    if health, result.reason='Признак исправности опоры обновлён'; end
 catch ex
     if startsWith(ex.identifier,'libekf:')
         result.reason=ex.identifier;

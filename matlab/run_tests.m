@@ -1145,6 +1145,45 @@ assert(~rejected.accepted&&strcmp(rejected.reason,'libekf:Correlation')&&isequal
 contradictory.reference_noise_cross_cov=zeros(6,3);
 [~,accepted]=nav_assimilate(filter,contradictory,sensor,e,100); assert(accepted.accepted);
 
+% Health reports have their own time and provenance; they are not measurements.
+health=struct('model','reference_health','source','reference_monitor','lineage',{{'left_failed'}}, ...
+    'quality','VALID','peer_id','left','valid',false,'frame_id',s.frame_id, ...
+    't_measure',s.t,'t_received',s.t);
+[disabled,accepted]=nav_assimilate(after_range,health,[],motion_env,100);
+assert(accepted.accepted&&~disabled.reference_bank.valid(1));
+assert(isequal(disabled.state,after_range.state)&&isequal(disabled.P,after_range.P));
+close(disabled.reference_bank.covariance,after_range.reference_bank.covariance,0);
+bad_health=health; bad_health.peer_id='unknown';
+[unchanged,rejected]=nav_assimilate(after_range,bad_health,[],motion_env,100);
+assert(~rejected.accepted&&isequal(unchanged,after_range));
+[unchanged,rejected]=nav_assimilate(disabled,health,[],motion_env,100);
+assert(~rejected.accepted&&isequal(unchanged,disabled));
+% Недостоверный, просроченный или ещё не полученный отчёт не меняет решение.
+bad_health=health; bad_health.quality='INVALID';
+[unchanged,rejected]=nav_assimilate(after_range,bad_health,[],motion_env,100);
+assert(~rejected.accepted&&isequal(unchanged,after_range));
+bad_health=health; bad_health.t_received=s.t+1;
+[unchanged,rejected]=nav_assimilate(after_range,bad_health,[],motion_env,100, ...
+    struct('now',s.t,'max_age',2));
+assert(~rejected.accepted&&isequal(unchanged,after_range));
+[unchanged,rejected]=nav_assimilate(after_range,health,[],motion_env,100, ...
+    struct('now',s.t+2,'max_age',1));
+assert(~rejected.accepted&&isequal(unchanged,after_range));
+[boundary,accepted]=nav_assimilate(after_range,health,[],motion_env,100, ...
+    struct('now',s.t+1,'max_age',1));
+assert(accepted.accepted&&isequal(boundary,disabled));
+health.t_measure=s.t+.125; health.t_received=s.t+.2;
+[disabled_history,history_check]=nav_replay(after_range,{imu,next_imu},{later,health},{sensor,[]},motion_env,100);
+assert(history_check.accepted&&~history_check.observations{1}.accepted&&history_check.observations{2}.accepted);
+[health_only,history_check]=nav_replay(after_range,{imu,next_imu},{health},{[]},motion_env,100);
+assert(history_check.accepted&&isequal(disabled_history,health_only));
+restored_health=health; restored_health.valid=true; restored_health.t_measure=s.t+.14;
+restored_health.lineage={'left_restored'};
+[restored_history,history_check]=nav_replay(after_range,{imu,next_imu}, ...
+    {later,restored_health,health},{sensor,[],[]},motion_env,100);
+assert(history_check.accepted&&all(cellfun(@(x)x.accepted,history_check.observations))&& ...
+    restored_history.reference_bank.valid(1));
+
 % Impossible peer dependence must be rejected even perpendicular to the measured range.
 [s,e]=fixture; m=packet(s,'cooperative_range'); m.lever=zeros(3,1);
 m.station=s.p+[10;0;0]; m.z=10; m.peer_covariance=eye(3);
