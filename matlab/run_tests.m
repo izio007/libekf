@@ -74,6 +74,45 @@ for k=1:numel(models)
     close(a.P,b.P,2e-7); close(ra.nis,rb.nis,2e-6);
     assert(isequal(a.used,b.used) && a.state.t==s.t);
 end
+% LEKF-001/003: все модели одновременно в одном состоянии.
+% Нулевые невязки фиксируют точку линеаризации; независимые ошибки
+% позволяют получить эталон по сумме информационных матриц.
+packets=cell(size(models)); information=eye(21);
+for k=1:numel(models)
+    m=packet(s,models{k}); m.frame='SENSOR_LOCAL';
+    observation=nav_observe_source(s,m,sensor0,e);
+    if strcmp(m.model,'attitude'), m.z=s.q;
+    else, m.z=observation.predicted; end
+    observation=nav_observe_source(s,m,sensor0,e);
+    assert(norm(observation.residual)<1e-10);
+    information=information+observation.H.'*(observation.R\observation.H);
+    packets{k}=m;
+end
+expected=information\eye(21);
+for order={1:numel(models),numel(models):-1:1}
+    combined=f;
+    for k=order{1}
+        [combined,accepted]=nav_assimilate(combined,packets{k},sensor0,e,1e8);
+        assert(accepted.accepted,'libekf:AllSources','Combined %s: %s',models{k},accepted.reason);
+    end
+    close(combined.P,expected,2e-9);
+    close(combined.state.p,s.p,1e-10); close(combined.state.v,s.v,1e-10);
+    close(nav_rotation(combined.state.q),nav_rotation(s.q),1e-10);
+    assert(numel(combined.used)==numel(models)&&numel(combined.source_history)==numel(models));
+end
+% Неисправный прибор не влияет на результат остальных систем.
+excluded=7; mixed=f; healthy=f;
+for k=1:numel(models)
+    m=packets{k};
+    if k==excluded, m.quality='FAILED'; end
+    [mixed,accepted]=nav_assimilate(mixed,m,sensor0,e,1e8);
+    assert(accepted.accepted==(k~=excluded));
+    if k~=excluded
+        [healthy,accepted]=nav_assimilate(healthy,packets{k},sensor0,e,1e8);
+        assert(accepted.accepted);
+    end
+end
+assert(isequal(mixed,healthy));
 % Совместная коррекция положения разными независимыми приборами имеет аналитический ответ.
 s.q=[1;0;0;0]; f.state=s;
 m=packet(s,'gnss_position'); m.frame='SENSOR_LOCAL'; m.lever=zeros(3,1);
