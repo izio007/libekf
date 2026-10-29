@@ -41,8 +41,9 @@ if numel(history.t)>cfg.capacity
 end
 result=struct('status','NOT_READY','ready',false(1,3),'alarm',false(1,3), ...
     'mean',NaN(1,3),'rms',NaN(1,3),'instant_alarm',false,'t',now,'age',Inf, ...
-    'alarm_only',history.alarm_only);
+    'alarm_only',history.alarm_only,'interval',[NaN NaN]);
 if isempty(history.t), return; end
+result.interval=[history.t(1) now];
 result.age=now-history.t(end); fresh=result.age<=cfg.max_age;
 result.instant_alarm=fresh && norm(history.value(:,end))>cfg.instant_limit;
 for k=1:3

@@ -1,7 +1,8 @@
 function [sample,result]=nav_compare_sources(a,b,cross_cov,now,cfg)
 % Сравнение двух оценок одной физической величины; не определяет виновный источник.
 sample=[]; result=struct('status','NOT_READY','reason','','nis',NaN, ...
-    'shared_sources',{{}},'provenance','UNKNOWN','covariance_model','UNSPECIFIED','nis_kind','UNAVAILABLE');
+    'shared_sources',{{}},'involved_sources',{{}},'provenance_complete',false,'t',NaN,'interval',[NaN NaN], ...
+    'provenance','UNKNOWN','covariance_model','UNSPECIFIED','nis_kind','UNAVAILABLE');
 required={'value','covariance','quantity','units','frame_id','t','quality','source'};
 for k=1:numel(required)
     assert(isfield(a,required{k})&&isfield(b,required{k}),'libekf:Comparison','Incomplete source estimate.');
@@ -27,6 +28,8 @@ if order(1)==2, tmp=a; a=b; b=tmp; cross_cov=cross_cov.'; end
 [inputs_a,complete_a]=source_inputs(a);
 [inputs_b,complete_b]=source_inputs(b);
 result.shared_sources=intersect(inputs_a,inputs_b);
+result.involved_sources=union(inputs_a,inputs_b);
+result.provenance_complete=complete_a&&complete_b; result.t=a.t; result.interval=[a.t a.t];
 if ~isempty(result.shared_sources)
     result.provenance='SHARED_INPUTS';
 elseif complete_a&&complete_b

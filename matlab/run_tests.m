@@ -2407,6 +2407,69 @@ fails(@()nav_visual_ambiguity(first,second,K,true(size(training)),limits),'libek
 end
 
 function requirement_source_comparison
+% Изоляция сохраняет все объяснения, допустимые по явно заданному числу отказов.
+first=struct('value',10,'covariance',1,'quantity','height','units',{{'m'}}, ...
+    'frame_id','local','t',10,'quality','VALID','source','solution_a', ...
+    'input_sources',{{'a'}},'provenance_complete',true);
+second=first; second.value=0; second.source='solution_b'; second.input_sources={'b'};
+third=second; third.source='solution_c'; third.input_sources={'c'};
+comparison=struct('max_age',1,'limit',3,'context','height_isolation');
+[ab_sample,ab]=nav_compare_sources(first,second,0,10,comparison);
+[ac_sample,ac]=nav_compare_sources(first,third,0,10,comparison);
+[~,bc]=nav_compare_sources(second,third,0,10,comparison);
+policy=struct('max_faults',1,'max_hypotheses',10,'max_age',1,'max_span',0);
+isolated=nav_isolate_sources({'a','b','c'},{ab,ac,bc},10,policy);
+assert(isolated.complete&&strcmp(isolated.status,'ISOLATED')&&isequal(isolated.suspected_sources,{'a'}));
+ambiguous=nav_isolate_sources({'a','b','c'},{ab},10,policy);
+assert(ambiguous.complete&&strcmp(ambiguous.status,'AMBIGUOUS')&&isempty(ambiguous.suspected_sources));
+two_faults=policy; two_faults.max_faults=2;
+ambiguous=nav_isolate_sources({'a','b','c'},{ab,ac,bc},10,two_faults);
+assert(strcmp(ambiguous.status,'AMBIGUOUS')&&isempty(ambiguous.suspected_sources));
+reordered=nav_isolate_sources({'c','a','b'},{bc,ac,ab},10,policy);
+assert(isequal(reordered.suspected_sources,isolated.suspected_sources));
+% Тревога на F/M/S содержит те же возможные физические причины.
+watch_cfg=struct('windows',[1 2 3],'max_gap',1,'max_age',1,'capacity',10, ...
+    'instant_limit',5,'mean_limit',[5 5 5],'rms_limit',[5 5 5]);
+[~,wab]=nav_watch([],ab_sample,10,watch_cfg); [~,wac]=nav_watch([],ac_sample,10,watch_cfg);
+wab.involved_sources=ab.involved_sources; wab.provenance_complete=ab.provenance_complete;
+wac.involved_sources=ac.involved_sources; wac.provenance_complete=ac.provenance_complete;
+from_watch=nav_isolate_sources({'a','b','c'},{wab,wac},10,policy);
+assert(isequal(from_watch.suspected_sources,isolated.suspected_sources));
+periodic=wab; periodic.interval=[8 10];
+insufficient_period=nav_isolate_sources({'a','b','c'},{periodic,wac},10,policy);
+assert(strcmp(insufficient_period.status,'NOT_READY'));
+whole_period=policy; whole_period.max_span=2;
+covered=nav_isolate_sources({'a','b','c'},{periodic,wac},10,whole_period);
+assert(isequal(covered.suspected_sources,{'a'})&&isequal(covered.interval,[8 10]));
+
+% Две неисправности объясняют те же данные иначе; согласующаяся пара не объявляется исправной.
+conflict=bc; conflict.status='ALARM';
+inconsistent=nav_isolate_sources({'a','b','c'},{ab,ac,conflict},10,policy);
+assert(inconsistent.complete&&strcmp(inconsistent.status,'INCONSISTENT')&&isempty(inconsistent.suspected_sources));
+small=two_faults; small.max_hypotheses=6;
+incomplete=nav_isolate_sources({'a','b','c'},{ab,ac},10,small);
+assert(~incomplete.complete&&strcmp(incomplete.status,'NOT_READY')&&isempty(incomplete.suspected_sources));
+unknown=ab; unknown.provenance_complete=false;
+incomplete=nav_isolate_sources({'a','b','c'},{unknown,ac},10,policy);
+assert(~incomplete.complete&&isempty(incomplete.suspected_sources));
+stale=nav_isolate_sources({'a','b','c'},{ab,ac},12,policy); assert(strcmp(stale.status,'NOT_READY'));
+early=ac; early.t=9.5; early.interval=[9.5 9.5];
+mixed=nav_isolate_sources({'a','b','c'},{ab,early},10,policy); assert(strcmp(mixed.status,'NOT_READY'));
+% Общая ИНС входит в множество возможных причин каждого вычисленного решения.
+first.input_sources={'imu','a'}; second.input_sources={'imu','b'}; third.input_sources={'imu','c'};
+third.value=-10;
+[~,ab]=nav_compare_sources(first,second,0,10,comparison);
+[~,ac]=nav_compare_sources(first,third,0,10,comparison);
+[~,bc]=nav_compare_sources(second,third,0,10,comparison);
+physical=nav_isolate_sources({'imu','a','b','c'},{ab,ac,bc},10,policy);
+assert(physical.complete&&isequal(physical.suspected_sources,{'imu'}));
+single=struct('status','ALARM','t',10,'involved_sources',{{'a'}},'provenance_complete',true);
+none=policy; none.max_faults=0;
+impossible=nav_isolate_sources({'a'},{single},10,none);
+assert(strcmp(impossible.status,'INCONSISTENT'));
+single_fault=nav_isolate_sources({'a'},{single},10,policy);
+assert(isequal(single_fault.suspected_sources,{'a'}));
+
 a=struct('value',[2;0;0],'covariance',eye(3),'quantity','position','units',{{'m';'m';'m'}}, ...
     'frame_id','local','t',10,'quality','VALID','source','one');
 b=a; b.value=zeros(3,1); b.source='two';
