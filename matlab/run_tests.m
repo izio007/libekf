@@ -1310,6 +1310,44 @@ close(joint_advanced.future_noise.peer_cross_cov,Aref*snapshot.future_noise.peer
 close(joint_advanced.future_noise.cross_cov, ...
     joint_info.propagation.transition*snapshot.future_noise.cross_cov,1e-12);
 assert(joint_advanced.future_noise.peer_time==imu.t_end&&joint_advanced.reference_bank.t==imu.t_end);
+% Физическая дальность после движения автоматически включает ошибку опоры.
+range_packet=packet(joint_advanced.state,'cooperative_range'); range_packet.frame='SENSOR_LOCAL';
+range_packet=rmfield(range_packet,{'station','peer_covariance','peer_cross_cov', ...
+    'peer_cross_frame_id','peer_time','peer_valid'});
+range_packet.peer_id='peer'; range_packet.noise_model='joint_required';
+range_packet.future_noise_independent=true; range_packet.lever=zeros(3,1);
+range_packet.lineage={'joint_range_after_motion'};
+distance_vector=joint_advanced.state.p-joint_advanced.reference_bank.position;
+direction=distance_vector.'/norm(distance_vector);
+range_packet.z=norm(distance_vector)+.2;
+range_sensor=struct('id',s.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
+bank=joint_advanced.reference_bank; noise=joint_advanced.future_noise;
+prior_joint=[joint_advanced.P bank.cross_cov noise.cross_cov; ...
+    bank.cross_cov.' bank.covariance noise.peer_cross_cov; ...
+    noise.cross_cov.' noise.peer_cross_cov.' noise.covariance];
+geometry=[direction zeros(1,18) -direction 0];
+gain=prior_joint*geometry.'/(geometry*prior_joint*geometry.'+range_packet.R);
+expected_joint=prior_joint-gain*geometry*prior_joint;
+[range_updated,range_info]=nav_assimilate(joint_advanced,range_packet,range_sensor,motion,100);
+assert(range_info.accepted);
+reset=blkdiag(range_info.error_reset,eye(4)); expected_joint=reset*expected_joint*reset.';
+actual_joint=[range_updated.P range_updated.reference_bank.cross_cov range_updated.future_noise.cross_cov; ...
+    range_updated.reference_bank.cross_cov.' range_updated.reference_bank.covariance range_updated.future_noise.peer_cross_cov; ...
+    range_updated.future_noise.cross_cov.' range_updated.future_noise.peer_cross_cov.' range_updated.future_noise.covariance];
+close(actual_joint,expected_joint,1e-11);
+close(range_updated.state.p,joint_advanced.state.p+gain(1:3)*.2,1e-11);
+close(range_updated.reference_bank.position,bank.position+gain(22:24)*.2,1e-11);
+close(range_updated.future_noise.mean,noise.mean+gain(25)*.2,1e-11);
+expected_cross=-noise.peer_cross_cov.'*direction.';
+assert(abs(expected_cross)>1e-8);
+close(range_info.observation.future_noise.measurement_cross_cov,expected_cross,1e-12);
+% Явная связь с собственным шумом дальномера складывается с вкладом опоры.
+dependent_range=range_packet; dependent_range.future_noise_independent=false;
+dependent_range.future_noise_cross_cov=.01;
+[~,dependent_info]=nav_assimilate(joint_advanced,dependent_range,range_sensor,motion,100);
+assert(dependent_info.accepted);
+close(dependent_info.observation.future_noise.measurement_cross_cov,expected_cross+.01,1e-12);
+
 % Промежуточное сообщение здоровья делит интервал, не добавляя измерительной информации.
 event=struct('model','source_health','source','watch','lineage',{{'joint_health'}}, ...
     'quality','VALID','target_source','unrelated_sensor','valid',false, ...
