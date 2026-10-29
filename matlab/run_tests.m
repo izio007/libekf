@@ -82,6 +82,7 @@ for k=1:numel(models)
     m=packet(s,models{k}); m.frame='SENSOR_LOCAL';
     observation=nav_observe_source(s,m,sensor0,e);
     if strcmp(m.model,'attitude'), m.z=s.q;
+    elseif strcmp(m.model,'rsdn_arrival_times'), m.z=[0;observation.predicted];
     else, m.z=observation.predicted; end
     observation=nav_observe_source(s,m,sensor0,e);
     assert(norm(observation.residual)<1e-10);
@@ -273,6 +274,8 @@ cases={ ...
     'optical_landmarks',{'calibration_valid','matches_valid','map_valid','camera_to_body','intrinsics','landmarks','min_depth'}; ...
     'magnetic_vector',{'field_valid','calibration_valid','field_gradient','field_radius','field_time','field_origin','field_vector'}; ...
     'rsdn_time_difference',{'geometry_at_epoch','stations','propagation_speed','time_correction','reference_station'}; ...
+    'rsdn_arrival_times',{'geometry_at_epoch','stations','propagation_speed','time_correction','reference_station', ...
+        'arrival_time_origin','synchronization_valid','ambiguity_resolved'}; ...
     'doppler_velocity',{'beams_body','surface_valid','beam_geometry_valid','surface_velocity'}; ...
     'doppler_frequency',{'beams_body','surface_valid','beam_geometry_valid','surface_velocity', ...
         'wavelength','frequency_sign','frequency_correction','monostatic','calibration_valid'}; ...
@@ -525,6 +528,37 @@ pm.model='impact_pressure'; pm.z=diff(pm.z); pm.R=1100; pm.units={'Pa'};
 [unchanged,info]=nav_assimilate(f,pm,sensor,pe,100);
 assert(~info.accepted&&isequal(unchanged,f));
 
+% LEKF-027: общая опорная станция связывает разности; ошибка общих часов сокращается.
+arrival=packet(s,'rsdn_arrival_times'); arrival.z=[.001;.001003;.001005];
+arrival.R=diag([4 9 16])*1e-12;
+observed=nav_measurement(s,arrival,e);
+close(observed.R,[13 4;4 20]*1e-12,1e-24);
+close(observed.residual+observed.predicted,[3;5]*1e-6,1e-18);
+common=arrival; common.z=arrival.z+.125; common.R=arrival.R+25e-12*ones(3);
+shifted=nav_measurement(s,common,e);
+close(shifted.residual,observed.residual,1e-16); close(shifted.R,observed.R,1e-24);
+for field={'synchronization_valid','ambiguity_resolved'}
+    bad=arrival; bad.(field{1})=false;
+    fails(@()nav_measurement(s,bad,e),'libekf:RSDN');
+end
+% Полный пересчёт исходной взаимной ковариации даёт ту же общую поправку.
+joint_arrival=arrival; joint_arrival.noise_model='joint_required';
+joint_arrival.state_noise_frame_id=s.frame_id;
+joint_arrival.state_noise_cov=zeros(21,3); joint_arrival.state_noise_cov(1,:)=[1 2 3]*1e-8;
+prepared=joint_arrival; prepared.model='rsdn_time_difference';
+prepared.z=arrival.z(2:end)-arrival.z(1); prepared.units={'s';'s'};
+prepared.R=[13 4;4 20]*1e-12; prepared.state_noise_cov=zeros(21,2);
+prepared.state_noise_cov(1,:)=[1 2]*1e-8;
+[raw_state,raw_P,raw_info]=nav_correct(s,eye(21),nav_measurement(s,joint_arrival,e),1e8);
+[prepared_state,prepared_P,prepared_info]=nav_correct(s,eye(21),nav_measurement(s,prepared,e),1e8);
+assert(raw_info.accepted&&prepared_info.accepted);
+close(raw_state.p,prepared_state.p,1e-12); close(raw_P,prepared_P,1e-12);
+% Недопустимая связь с общими часами не скрывается после взятия разностей.
+bad=arrival; bad.noise_model='joint_required'; bad.state_noise_frame_id=s.frame_id;
+bad.state_noise_cov=zeros(21,3); bad.state_noise_cov(1,:)=1e-3;
+bad_observation=nav_measurement(s,bad,e);
+close(bad_observation.state_noise_cov,zeros(21,2),1e-15);
+fails(@()nav_correct(s,eye(21),bad_observation,1e8),'libekf:Correlation');
 % Доплеровские проекции относятся к поверхности, а не к воздушному потоку.
 s.q=[1;0;0;0]; s.v=[3;4;5];
 m=packet(s,'doppler_velocity'); m.lever=zeros(3,1);
@@ -640,11 +674,15 @@ switch model
         m.range_correction=2; m.geometry_at_epoch=true; m.propagation_speed=299792458;
         m.z=0; m.R=1; m.units={'m'};
         if strcmp(model,'time_difference'), m.units={'s'}; m.R=1/m.propagation_speed^2; end
-    case 'rsdn_time_difference'
+    case {'rsdn_time_difference','rsdn_arrival_times'}
         m.stations=s.p.'+[300 400 200;-400 100 200];
         m.reference_station=s.p+[-500;100;300]; m.propagation_speed=299792458;
         m.time_correction=[2;1]/m.propagation_speed; m.geometry_at_epoch=true;
         m.z=[0;0]; m.R=[1 .5;.5 1]/m.propagation_speed^2; m.units={'s';'s'};
+        if strcmp(model,'rsdn_arrival_times')
+            m.z=zeros(3,1); m.R=eye(3)*.5/m.propagation_speed^2; m.units={'s';'s';'s'};
+            m.arrival_time_origin=s.t; m.synchronization_valid=true; m.ambiguity_resolved=true;
+        end
     case 'celestial_pixels'
         m.camera_to_body=eye(3); m.intrinsics=[800;800;320;240];
         directions=[.1 -.2;.2 .1;1 1]; directions=directions./vecnorm(directions);
@@ -2161,7 +2199,7 @@ models={'gnss_position','external_position','gnss_velocity','external_velocity',
     'gnss_position_velocity','external_position_velocity','dme_range','pseudorange', ...
     'range_rate','vor_azimuth','baro_height','airdata','radar_range','ils_angles', ...
     'gls_deviation','attitude','radar_footprint','doppler_velocity','doppler_frequency', ...
-    'adf_bearing','station_range_azimuth','range_difference','time_difference','rsdn_time_difference','magnetic_vector','optical_landmarks','celestial_pixels','cooperative_range','static_pressure','impact_pressure','air_pressures'};
+    'adf_bearing','station_range_azimuth','range_difference','time_difference','rsdn_time_difference','rsdn_arrival_times','magnetic_vector','optical_landmarks','celestial_pixels','cooperative_range','static_pressure','impact_pressure','air_pressures'};
 end
 
 function requirement_all_source_timing

@@ -8,6 +8,8 @@ for k=1:numel(required)
     assert(isfield(m,required{k}), 'libekf:Packet', ['Missing ' required{k}]);
 end
 assert(ischar(m.source) && ~isempty(m.source) && ischar(m.model), 'libekf:Packet','Invalid source/model.');
+raw_timing=[];
+if strcmp(m.model,'rsdn_arrival_times'), [m,raw_timing]=rsdn_differences(m); end
 assert(strcmp(m.quality,'VALID'), 'libekf:Quality','Only VALID input enters observation construction.');
 assert(strcmp(m.frame,'LOCAL') && strcmp(m.frame_id,s.frame_id) && strcmp(s.frame_id,env.frame_id), ...
     'libekf:Frame','Packet, state and environment must share one local frame ID.');
@@ -415,6 +417,15 @@ if isfield(m,'state_noise_cov')
     obs.state_noise_cov=U;
 end
 
+if ~isempty(raw_timing)
+    obs.model='rsdn_arrival_times';
+    if isfield(raw_timing,'cross')
+        obs.input_noise_cov=raw_timing.covariance;
+        obs.state_input_cov=raw_timing.cross;
+        obs.noise_transform=raw_timing.transform;
+    end
+end
+
 end
 
 function v=vector3(v)
@@ -432,4 +443,32 @@ function require_fields(packet,names)
 for k=1:numel(names)
     assert(isfield(packet,names{k}),'libekf:Packet',['Missing model field ' names{k}]);
 end
+end
+
+function [m,raw]=rsdn_differences(m)
+% Времена отсчитываются от одной близкой опоры: первая компонента — ведущая станция.
+require_fields(m,{'stations','arrival_time_origin','synchronization_valid','ambiguity_resolved'});
+count=size(m.stations,1)+1; z=m.z(:); R=m.R;
+assert(isnumeric(z)&&isreal(z)&&numel(z)==count&&count>=2&&all(isfinite(z))&& ...
+    isnumeric(m.arrival_time_origin)&&isreal(m.arrival_time_origin)&& ...
+    isscalar(m.arrival_time_origin)&&isfinite(m.arrival_time_origin)&& ...
+    isequal(m.synchronization_valid,true)&&isequal(m.ambiguity_resolved,true), ...
+    'libekf:RSDN','Unresolved or invalid arrival-time observations.');
+assert(iscell(m.units)&&isequal(m.units(:),repmat({'s'},count,1)), ...
+    'libekf:Units','Arrival times must be in seconds.');
+assert(isnumeric(R)&&isreal(R)&&isequal(size(R),[count count])&&all(isfinite(R(:)))&& ...
+    norm(R-R.','fro')<=1e-12*max(norm(R,'fro'),realmin)&&all(diag(R)>0), ...
+    'libekf:Covariance','Invalid arrival-time covariance.');
+scale=sqrt(diag(R)); [~,flag]=chol((R./scale)./scale.');
+assert(flag==0,'libekf:Covariance','Arrival-time covariance must be positive definite.');
+D=[-ones(count-1,1) eye(count-1)];
+raw=struct('covariance',R,'transform',D);
+if isfield(m,'state_noise_cov')
+    U=m.state_noise_cov;
+    assert(isnumeric(U)&&isreal(U)&&any(size(U,1)==[21 42])&&size(U,2)==count&&all(isfinite(U(:))), ...
+        'libekf:Correlation','Invalid state/arrival-time covariance.');
+    raw.cross=U; m.state_noise_cov=U*D.';
+end
+m.z=z(2:end)-z(1); m.R=D*R*D.'; m.units=repmat({'s'},count-1,1);
+m.model='rsdn_time_difference';
 end
