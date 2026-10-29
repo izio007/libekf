@@ -67,9 +67,16 @@ try
                 packet.reference_bank=bank;
             else
                 assert(isfield(packet,'reference_noise_independent')&& ...
-                    isequal(packet.reference_noise_independent,true), ...
-                    'libekf:Correlation','Observation noise independence from stored references must be explicit.');
-                bank.noise_independent=true; packet.retained_reference=bank;
+                    (isequal(packet.reference_noise_independent,true)||isequal(packet.reference_noise_independent,false)), ...
+                    'libekf:Correlation','Reference noise dependence must be explicit.');
+                bank.noise_independent=packet.reference_noise_independent;
+                if ~bank.noise_independent
+                    assert(isfield(packet,'reference_noise_cross_cov'),'libekf:Correlation','Missing reference/noise covariance.');
+                end
+                if isfield(packet,'reference_noise_cross_cov')
+                    bank.noise_cross_cov=packet.reference_noise_cross_cov;
+                end
+                packet.retained_reference=bank;
             end
         end
     end
@@ -133,7 +140,9 @@ try
             for name={'position','covariance','cross_cov','t','frame_id'}
                 bank.(name{1})=update.(name{1});
             end
-            if isfield(bank,'noise_independent'), bank=rmfield(bank,'noise_independent'); end
+            for name={'noise_independent','noise_cross_cov'}
+                if isfield(bank,name{1}), bank=rmfield(bank,name{1}); end
+            end
         end
         out.reference_bank=bank;
     end

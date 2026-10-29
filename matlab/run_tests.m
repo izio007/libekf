@@ -1090,6 +1090,61 @@ close(predicted_new.cross_cov,predicted_expected.cross_cov,1e-10);
 bad_model=discrete; bad_model.frame_id='wrong';
 fails(@()nav_change_frame(s,bankP,e,destination,bank,bad_model),'libekf:Frame');
 
+% Known measurement dependence with both navigation and references is retained.
+dependent=packet(s,'gnss_position'); dependent.lever=zeros(3,1); dependent.z=s.p+[1;0;0];
+dependent.R=eye(3); dependent.noise_model='joint_required';
+dependent.state_noise_cov=zeros(21,3); dependent.state_noise_cov(1,1)=.5;
+dependent.state_noise_frame_id=s.frame_id;
+retained=bank; retained.noise_independent=false; retained.noise_cross_cov=zeros(6,3);
+retained.noise_cross_cov(1,1)=.25;
+o=nav_measurement(s,dependent,e); [updated,updatedP,info]=nav_correct(s,bankP,o,100,retained);
+assert(info.accepted); close(updated.p,s.p+[.75;0;0],1e-12); close(updatedP(1,1),5/8,1e-12);
+close(info.peer_update.position(1),bank.position(1)+5/24,1e-12);
+close(info.peer_update.covariance(1,1),839/96,1e-12);
+close(info.peer_update.cross_cov(1,1),1/16,1e-12);
+impossible=retained; impossible.noise_cross_cov(1,1)=1e6;
+fails(@()nav_correct(s,bankP,o,100,impossible),'libekf:Correlation');
+filter=struct('state',s,'P',bankP,'used',{{}},'capacity',10,'reference_bank',bank);
+dependent.frame='SENSOR_LOCAL'; dependent.reference_noise_independent=false;
+dependent.reference_noise_cross_cov=retained.noise_cross_cov;
+[through,accepted]=nav_assimilate(filter,dependent,sensor,e,100);
+assert(accepted.accepted); close(through.P,updatedP,1e-12);
+close(through.reference_bank.cross_cov,info.peer_update.cross_cov,1e-12);
+assert(~isfield(through.reference_bank,'noise_cross_cov'));
+
+% Changing measurement axes/scales must transform both noise cross-covariances.
+W=[0 -2 0;3 0 0;0 0 .5]; transformed=o;
+transformed.residual=W*o.residual; transformed.H=W*o.H; transformed.R=W*o.R*W.';
+transformed.state_noise_cov=o.state_noise_cov*W.';
+transformed_reference=retained; transformed_reference.noise_cross_cov=retained.noise_cross_cov*W.';
+[scaled,scaledP,scaled_info]=nav_correct(s,bankP,transformed,100,transformed_reference);
+assert(scaled_info.accepted); close(scaled.p,updated.p,1e-12); close(scaledP,updatedP,1e-12);
+close(scaled_info.peer_update.position,info.peer_update.position,1e-12);
+close(scaled_info.peer_update.covariance,info.peer_update.covariance,1e-12);
+close(scaled_info.peer_update.cross_cov,info.peer_update.cross_cov,1e-12);
+% Check the real sensor adapter, including its translated origin.
+rotation=[0 -1 0;1 0 0;0 0 1]; offset=[3;-5;2];
+rotated_sensor=struct('id','dependent_sensor','origin_ecef',e.origin_ecef+e.C_e_l*offset, ...
+    'C_e_s',e.C_e_l*rotation);
+rotated_packet=dependent; rotated_packet.frame_id=rotated_sensor.id;
+rotated_packet.z=rotation.'*(dependent.z-offset);
+rotated_packet.R=rotation.'*dependent.R*rotation;
+rotated_packet.state_noise_cov=dependent.state_noise_cov*rotation;
+rotated_packet.reference_noise_cross_cov=dependent.reference_noise_cross_cov*rotation;
+[rotated_result,accepted]=nav_assimilate(filter,rotated_packet,rotated_sensor,e,100);
+assert(accepted.accepted); close(rotated_result.state.p,through.state.p,1e-8);
+close(rotated_result.P,through.P,1e-8);
+close(rotated_result.reference_bank.position,through.reference_bank.position,1e-8);
+close(rotated_result.reference_bank.cross_cov,through.reference_bank.cross_cov,1e-8);
+
+% An independence flag cannot hide a supplied nonzero reference/noise covariance.
+contradictory=dependent; contradictory.noise_model='independent';
+contradictory.state_noise_cov=zeros(21,3); contradictory.reference_noise_independent=true;
+[unchanged,rejected]=nav_assimilate(filter,contradictory,sensor,e,100);
+assert(~rejected.accepted&&strcmp(rejected.reason,'libekf:Correlation')&&isequal(unchanged,filter));
+contradictory.reference_noise_cross_cov=zeros(6,3);
+[~,accepted]=nav_assimilate(filter,contradictory,sensor,e,100); assert(accepted.accepted);
+
 % Impossible peer dependence must be rejected even perpendicular to the measured range.
 [s,e]=fixture; m=packet(s,'cooperative_range'); m.lever=zeros(3,1);
 m.station=s.p+[10;0;0]; m.z=10; m.peer_covariance=eye(3);

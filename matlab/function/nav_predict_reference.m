@@ -57,5 +57,7 @@ out.cross_cov=T*U*A.'; out.t=model.t_end;
 assert(all(isfinite(out.position))&&all(isfinite(out.covariance(:)))&&all(isfinite(out.cross_cov(:))), ...
     'libekf:Covariance','Reference propagation overflow.');
 % Независимость следующего измерения не наследуется от предыдущего.
-if isfield(out,'noise_independent'), out=rmfield(out,'noise_independent'); end
+for name={'noise_independent','noise_cross_cov'}
+    if isfield(out,name{1}), out=rmfield(out,name{1}); end
+end
 end
