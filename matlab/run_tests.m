@@ -3374,6 +3374,46 @@ assert(~trace.accepted&&strcmp(trace.reason,'libekf:RecoveryInitial')&&isequal(u
 [unchanged,trace]=nav_replay(clean_initial,{u},{},{},e,1e8,{}, {u.source});
 assert(~trace.accepted&&isequal(unchanged,clean_initial));
 
+% Автоматически выбирается самая поздняя незатронутая опора на границе истории.
+[newer_clean,trace]=nav_replay(clean_initial,{u},{},{},e,1e8);
+assert(trace.accepted);
+next=u; next.t_start=u.t_end; next.t_end=u.t_end+(u.t_end-u.t_start);
+next.t_received=next.t_end; next.lineage={'recovery_next_imu'};
+if isfield(next,'lineage_times'), next.lineage_times=next.t_end; end
+[expected_recovery,trace]=nav_replay(newer_clean,{next},{},{},e,1e8);
+assert(trace.accepted);
+dirty=contaminated; dirty.sources_complete=true;
+saved={dirty,clean_initial,newer_clean};
+[chosen,trace]=nav_replay(still_affected,{u,next},{suspect},{sensor},e,1e8,{[]}, ...
+    {'failed_position_sensor'},saved);
+assert(trace.accepted&&trace.snapshot_index==3&&trace.snapshot_time==newer_clean.state.t);
+close(chosen.state.p,expected_recovery.state.p,1e-12); close(chosen.P,expected_recovery.P,1e-12);
+assert(all(cellfun(@(x)x.interval_index==2,trace.steps)));
+% Порядок сохранённых опор не заменяет выбор по времени.
+[reordered,trace]=nav_replay(still_affected,{u,next},{},{},e,1e8,{}, ...
+    {'failed_position_sensor'},{newer_clean,dirty,clean_initial});
+assert(trace.accepted&&trace.snapshot_index==1); close(reordered.P,chosen.P,1e-12);
+% Новое запоздалое наблюдение нельзя потерять выбором более поздней опоры.
+healthy=suspect; healthy.source='healthy_processor'; healthy.input_sources={'healthy_sensor'};
+policy={struct('now',next.t_end,'max_age',10)};
+[late_expected,trace]=nav_replay(clean_initial,{u,next},{healthy},{sensor},e,1e8,policy, ...
+    {'failed_position_sensor'});
+assert(trace.accepted&&trace.observations{1}.accepted);
+[late_repaired,trace]=nav_replay(still_affected,{u,next},{healthy},{sensor},e,1e8,policy, ...
+    {'failed_position_sensor'},saved);
+assert(trace.accepted&&trace.snapshot_index==2&&trace.observations{1}.accepted);
+close(late_repaired.state.p,late_expected.state.p,1e-12); close(late_repaired.P,late_expected.P,1e-12);
+off_boundary=newer_clean; off_boundary.state.t=off_boundary.state.t+.001;
+for unavailable={{dirty,f,off_boundary},{}}
+    [unchanged,trace]=nav_replay(still_affected,{u,next},{},{},e,1e8,{}, ...
+        {'failed_position_sensor'},unavailable{1});
+    assert(~trace.accepted&&strcmp(trace.reason,'libekf:RecoveryInitial')&&isequal(unchanged,still_affected));
+end
+broken=next; broken.t_start=next.t_start+.001;
+[unchanged,trace]=nav_replay(still_affected,{u,broken},{},{},e,1e8,{}, ...
+    {'failed_position_sensor'},{clean_initial});
+assert(~trace.accepted&&isequal(unchanged,still_affected));
+
 % Производное наблюдение может относиться к более раннему времени, чем его исходные данные.
 derived=packet(mid,'external_position'); derived.frame='SENSOR_LOCAL';
 derived.lineage={'later_original'}; derived.lineage_times=mid.t+.02; derived.t_received=u.t_end+.1;

@@ -1,4 +1,4 @@
-function [out,result]=nav_replay(initial,intervals,packets,sensors,env,limit,admission,recovery_exclusions)
+function [out,result]=nav_replay(initial,intervals,packets,sensors,env,limit,admission,recovery_exclusions,recovery_snapshots)
 % Повторный расчёт сохранённой истории от неизменённого исходного снимка.
 % admission{k}: now/max_age для нового отсчёта; [] для ранее допущенной истории.
 % Без admission вызывающая сторона сама проверяет получение и возраст новых данных.
@@ -6,19 +6,44 @@ function [out,result]=nav_replay(initial,intervals,packets,sensors,env,limit,adm
 assert(iscell(intervals)&&~isempty(intervals)&&iscell(packets)&&iscell(sensors)&& ...
     numel(packets)==numel(sensors),'libekf:History','Expected inertial history and paired observation cells.');
 out=initial; result=struct('accepted',false,'reason','','observations',{{}},'steps',{{}});
+n=numel(packets); epochs=Inf(1,n); checks=cell(size(packets));
+if nargin<7, admission=cell(size(packets)); end
+assert(iscell(admission)&&numel(admission)==n, ...
+    'libekf:Time','One admission policy per observation required.');
 % Восстановительный пересчёт: запрет действует на всю историю, включая сообщения возврата.
 if nargin<8, recovery_exclusions={}; end
 assert(iscell(recovery_exclusions)&&all(cellfun(@(x)ischar(x)&&isrow(x)&&~isempty(x), ...
     recovery_exclusions)),'libekf:SourceHealth','Invalid recovery exclusion list.');
-if ~isempty(recovery_exclusions)
-    if ~isfield(initial,'sources_complete')||~isequal(initial.sources_complete,true)|| ...
-            ~isfield(initial,'source_history')|| ...
-            (isfield(initial,'invalidated_sources')&&~isempty(initial.invalidated_sources))
-        result.reason='libekf:RecoveryInitial'; return;
+first_interval=1;
+if nargin>=9
+    assert(iscell(recovery_snapshots)&&~isempty(recovery_exclusions), ...
+        'libekf:RecoveryInitial','Snapshot selection requires recovery exclusions.');
+    required_epoch=Inf;
+    for k=1:n
+        p=packets{k};
+        if isempty(admission{k})||~isstruct(p)||~isscalar(p)||~isfield(p,'model'), continue; end
+        field='t_measure'; if strcmp(p.model,'visual_odometry'), field='t_end'; end
+        if isfield(p,field)&&isnumeric(p.(field))&&isreal(p.(field))&& ...
+                isscalar(p.(field))&&isfinite(p.(field))
+            required_epoch=min(required_epoch,p.(field));
+        end
     end
-    history=initial.source_history;
-    if ~isstruct(history)||~isfield(history,'id')|| ...
-            any(ismember({history.id},recovery_exclusions))
+    selected=0; newest=-Inf;
+    for j=1:numel(recovery_snapshots)
+        saved=recovery_snapshots{j};
+        if ~recovery_initial(saved,recovery_exclusions)||saved.state.t>required_epoch, continue; end
+        boundary=find(cellfun(@(u)isstruct(u)&&isscalar(u)&&isfield(u,'t_start')&& ...
+            isequal(u.t_start,saved.state.t),intervals),1);
+        if ~isempty(boundary)&&saved.state.t>newest
+            selected=j; newest=saved.state.t; first_interval=boundary;
+        end
+    end
+    if selected==0, result.reason='libekf:RecoveryInitial'; return; end
+    initial=recovery_snapshots{selected};
+    result.snapshot_index=selected; result.snapshot_time=initial.state.t;
+end
+if ~isempty(recovery_exclusions)
+    if ~recovery_initial(initial,recovery_exclusions)
         result.reason='libekf:RecoveryInitial'; return;
     end
     previous={}; if isfield(initial,'excluded_sources'), previous=initial.excluded_sources; end
@@ -26,10 +51,6 @@ if ~isempty(recovery_exclusions)
         'libekf:SourceHealth','Invalid snapshot exclusion list.');
     initial.excluded_sources=unique([previous(:);recovery_exclusions(:)],'stable').';
 end
-n=numel(packets); epochs=Inf(1,n); checks=cell(size(packets));
-if nargin<7, admission=cell(size(packets)); end
-assert(iscell(admission)&&numel(admission)==n, ...
-    'libekf:Time','One admission policy per observation required.');
 for k=1:n
     checks{k}=struct('accepted',false,'reason','libekf:Epoch','nis',NaN);
     p=packets{k};
@@ -86,10 +107,10 @@ for j=1:numel(environments)
             'libekf:Frame','One frame identity cannot denote different origins or axes.');
     end
 end
-active=environments{1};
+active=environments{first_interval};
 if ~strcmp(initial.state.frame_id,active.frame_id), result.reason='libekf:Frame'; return; end
 candidate=initial; taken=false(1,n); steps={};
-for k=1:numel(intervals)
+for k=first_interval:numel(intervals)
     u=intervals{k};
     assert(isstruct(u)&&isscalar(u)&&all(isfield(u,{'t_start','t_end'}))&& ...
         isscalar(u.t_start)&&isscalar(u.t_end)&&all(isfinite([u.t_start u.t_end])), ...
@@ -121,4 +142,23 @@ for k=1:numel(intervals)
 end
 out=candidate; result.accepted=true; result.reason='История пересчитана от исходного снимка';
 result.observations=checks; result.steps=steps;
+end
+
+function valid=recovery_initial(saved,excluded)
+valid=false;
+if ~isstruct(saved)||~isscalar(saved)||~isfield(saved,'state')|| ...
+        ~isstruct(saved.state)||~isscalar(saved.state)||~isfield(saved.state,'t')|| ...
+        ~isnumeric(saved.state.t)||~isreal(saved.state.t)||~isscalar(saved.state.t)|| ...
+        ~isfinite(saved.state.t)||~isfield(saved,'sources_complete')|| ...
+        ~isequal(saved.sources_complete,true)||~isfield(saved,'source_history')|| ...
+        (isfield(saved,'invalidated_sources')&&~isempty(saved.invalidated_sources))
+    return;
+end
+try
+    history=nav_sources(saved.source_history);
+catch ex
+    if startsWith(ex.identifier,'libekf:'), return; else, rethrow(ex); end
+end
+valid=~any(ismember({history.id},excluded))&& ...
+    all([history.last_epoch]<=saved.state.t);
 end
