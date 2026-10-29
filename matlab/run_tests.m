@@ -74,6 +74,15 @@ for k=1:numel(models)
         end
         [expected_state,expected_P]=nav_correct(f.state,f.P,full,1e8);
         close(actual.state.p,expected_state.p,1e-10); close(actual.P,expected_P,1e-10);
+        common_history=struct('steps',{{struct('kind',m.model,'time',s.t,'data',accepted)}}, ...
+            'initial_times',s.t,'frame_id',s.frame_id,'noise_independent',true, ...
+            'initial_noise',with_noise.future_noise);
+        observed=nav_observability_sequence(common_history,ones(21,1),eye(21),1e-10);
+        expected_geometry=nav_observability(model.H,1.1*model.R,ones(21,1),accepted.error_reset,1e-10);
+        assert(isequal(observed.identified,expected_geometry.identified));
+        known=observed.identified;
+        if any(known), close(observed.variance(known),expected_geometry.variance(known),1e-8); end
+
     end
 
     % Определимость из принятой модели совпадает с отдельным расчётом без априорной P.
@@ -1028,6 +1037,7 @@ one.future_noise_independent=true;
 one.shared_noise=struct('ids',{initial.future_noise.ids},'units',{initial.future_noise.units}, ...
     'map',eye(3),'residual_units',{{'m','m','m'}},'residual_frame_id',sensor.id,'lineage',{{'calibration'}});
 [first_state,check]=nav_assimilate(initial,one,sensor,e,100); assert(check.accepted);
+first_record=check;
 two=one; two.z=s.p+[4;0;0]; two.lineage={'calibration','sample_2'};
 [second_state,check]=nav_assimilate(first_state,two,sensor,e,100); assert(check.accepted);
 % R двух измерений = [2 1;1 2]; начальная дисперсия положения = 1.
@@ -1037,6 +1047,24 @@ close(second_state.future_noise.mean,[6/5;0;0],1e-12);
 close(second_state.future_noise.covariance,(3/5)*eye(3),1e-12);
 close(second_state.future_noise.cross_cov,[-.4*eye(3);zeros(18,3)],1e-12);
 close(check.observation.conditional_noise_mean,[2/3;0;0],1e-12);
+% Проверка определимости восстанавливает исходную общую ошибку, а не считает условные R независимыми.
+history=struct('steps',{{struct('kind',one.model,'time',s.t,'data',first_record), ...
+    struct('kind',two.model,'time',s.t,'data',check)}}, ...
+    'initial_times',s.t,'frame_id',s.frame_id,'noise_independent',true,'initial_noise',initial.future_noise);
+target=[eye(3) zeros(3,18)]; geometry=nav_observability_sequence(history,ones(21,1),target,1e-10);
+assert(all(geometry.identified)); close(geometry.variance,1.5*ones(3,1),1e-12);
+missing=rmfield(history,'initial_noise');
+fails(@()nav_observability_sequence(missing,ones(21,1),target,1e-10),'libekf:Correlation');
+bad_history=history; bad_history.initial_noise.cross_cov(1,1)=.1;
+fails(@()nav_observability_sequence(bad_history,ones(21,1),target,1e-10),'libekf:Correlation');
+bad_history=history; bad_history.initial_noise.covariance(3,3)=-.5;
+fails(@()nav_observability_sequence(bad_history,ones(21,1),target,1e-10),'libekf:Correlation');
+correlated_step=struct('kind','propagation','data',struct('transition',eye(21), ...
+    'process_covariance',eye(21),'t_start',s.t,'t_end',s.t+1,'frame_id',s.frame_id, ...
+    'future_noise_process_cross_cov',[.1*eye(3);zeros(18,3)]));
+bad_history=history; bad_history.steps{end+1}=correlated_step;
+fails(@()nav_observability_sequence(bad_history,ones(21,1),target,1e-10),'libekf:Correlation');
+
 assert(numel(second_state.used)==3&&sum(strcmp(second_state.used,'calibration'))==1);
 [same,rejected]=nav_assimilate(second_state,two,sensor,e,100);
 assert(~rejected.accepted&&isequal(same,second_state));
@@ -2478,6 +2506,26 @@ control.geometry=struct('history',compiled,'scales',ones(21,1), ...
     'relative_tolerance',1e-10,'max_variance',[1;1;10]);
 published=nav_geodetic_output(state.state,state.P,e,control);
 assert(all(published.observable)); close(published.measurement_variance(3),1,1e-9);
+% Одна общая ошибка положения не уменьшается от повторов, но сокращается в разностях для скорости.
+with_common=filter; with_common.future_noise=struct('ids',{{'cx','cy','cz'}},'units',{{'m','m','m'}}, ...
+    'mean',zeros(3,1),'covariance',eye(3),'cross_cov',zeros(21,3),'state_times',s.t,'frame_id',s.frame_id);
+for j=1:3
+    packets{j}.future_noise_independent=true;
+    packets{j}.shared_noise=struct('ids',{with_common.future_noise.ids}, ...
+        'units',{with_common.future_noise.units},'map',eye(3),'residual_units',{{'m','m','m'}}, ...
+        'residual_frame_id',sensor.id,'lineage',{{}});
+end
+imu.future_noise_independent=true; second.future_noise_independent=true;
+[dependent,trace]=nav_replay(with_common,{imu,second},{packets{1},packets{2},save,packets{3}}, ...
+    {sensor,sensor,[],sensor},e,100);
+assert(trace.accepted&&all(cellfun(@(z)z.accepted,trace.observations)));
+common_history=compiled; common_history.steps=trace.steps; common_history.initial_noise=with_common.future_noise;
+geometry=nav_observability_sequence(common_history,ones(21,1),target,1e-10);
+assert(all(geometry.identified)); close(geometry.variance,[2*ones(3,1);6.5*ones(3,1)],1e-9);
+control.geometry.history=common_history;
+common_output=nav_geodetic_output(dependent.state,dependent.P,e,control);
+assert(all(common_output.observable)); close(common_output.measurement_variance(3),2,1e-9);
+
 unknown=compiled; unknown.noise_independent=false;
 fails(@()nav_observability_sequence(unknown,ones(21,1),target,1e-10),'libekf:Correlation');
 gap=compiled; first=find(cellfun(@(z)strcmp(z.kind,'propagation'),gap.steps),1);

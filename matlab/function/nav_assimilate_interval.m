@@ -115,6 +115,9 @@ end
 record=struct('transition',transition,'process_covariance',process_covariance, ...
     't_start',part.t_start,'t_end',part.t_end,'frame_id',in.state.frame_id, ...
     'source',imu.source,'lineage',{imu.lineage});
+if isfield(in,'future_noise')
+    record.future_noise_process_cross_cov=zeros(size(transition,1),numel(in.future_noise.mean));
+end
 if isfield(in,'reference_bank')
     motion=imu.reference_motion; motion.t_start=in.state.t; motion.t_end=t;
     transition=T; if isfield(in,'reference'), transition=blkdiag(eye(21),T); end

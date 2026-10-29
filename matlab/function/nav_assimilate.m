@@ -309,6 +309,7 @@ try
         result.propagation=struct('transition',transition,'process_covariance',process_covariance, ...
             't_start',packet.t_start,'t_end',packet.t_end,'frame_id',filter.state.frame_id, ...
             'source',packet.source,'lineage',{packet.lineage});
+        if stored_noise, result.propagation.future_noise_process_cross_cov=W; end
     elseif ~health
         result.observation=obs;
         result.error_reset=info.error_reset;
@@ -389,6 +390,8 @@ if any(isfield(obs,{'input_noise_cov','state_input_cov','noise_transform'}))
 end
 obs.input_noise_cov=blkdiag(raw,future.covariance);
 obs.state_input_cov=[raw_state future.cross_cov]; obs.noise_transform=[transform M];
+obs.shared_noise_model=struct('ids',{future.ids},'units',{future.units}, ...
+    'map',M,'fresh_covariance',obs.R);
 obs.conditional_noise_mean=M*future.mean(:);
 obs.residual=obs.residual-obs.conditional_noise_mean;
 obs.R=obs.R+M*future.covariance*M.'; obs.R=(obs.R+obs.R.')/2;
