@@ -1795,6 +1795,28 @@ end
 bad=u; bad.t_start=[s.t s.t];
 [unchanged,failed]=nav_assimilate(f,bad,[],e,1e8);
 assert(~failed.accepted&&isequal(unchanged,f));
+% Запрет сторожа действует даже при VALID в пакете; другие источники остаются доступны.
+report=struct('model','source_health','source','watch','lineage',{{'exclude_source'}}, ...
+    'quality','VALID','target_source','test','valid',false,'frame_id',s.frame_id, ...
+    't_measure',s.t,'t_received',u.t_end);
+models=source_models;
+for k=1:numel(models)
+    m=packet(mid,models{k}); m.frame='SENSOR_LOCAL'; report.target_source=m.source;
+    [blocked,info]=nav_replay(f,{u},{report,m},{[],sensor},e,1e8);
+    assert(info.accepted&&info.observations{1}.accepted&&~info.observations{2}.accepted);
+    close(blocked.P,plain.P,1e-12); close(blocked.state.p,plain.state.p,1e-12);
+    restored=report; restored.valid=true; restored.lineage={'restore_source'};
+    restored.t_measure=mid.t;
+    [~,info]=nav_replay(f,{u},{report,restored,m},{[],[],sensor},e,1e8);
+    assert(info.accepted&&all(cellfun(@(x)x.accepted,info.observations)));
+    independent=m; independent.source='other_source';
+    [~,info]=nav_replay(f,{u},{report,independent},{[],sensor},e,1e8);
+    assert(info.accepted&&all(cellfun(@(x)x.accepted,info.observations)));
+end
+% Отказ ИНС внутри интервала не допускает продолжения по тем же данным.
+report.target_source=u.source; report.t_measure=mid.t;
+[unchanged,info]=nav_assimilate_interval(f,u,{report},{[]},e,1e8);
+assert(~info.accepted&&strcmp(info.reason,'libekf:SourceHealth')&&isequal(unchanged,f));
 models=source_models;
 for k=1:numel(models)
     m=packet(mid,models{k}); m.frame='SENSOR_LOCAL'; m.t_received=u.t_end+1;

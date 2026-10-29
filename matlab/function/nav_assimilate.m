@@ -50,7 +50,14 @@ try
     end
     odometry=strcmp(packet.model,'visual_odometry');
     inertial=strcmp(packet.model,'inertial');
-    health=strcmp(packet.model,'reference_health');
+    source_health=strcmp(packet.model,'source_health');
+    health=strcmp(packet.model,'reference_health')||source_health;
+    excluded={};
+    if isfield(filter,'excluded_sources'), excluded=filter.excluded_sources; end
+    assert(iscell(excluded)&&all(cellfun(@(x)ischar(x)&&isrow(x)&&~isempty(x),excluded)), ...
+        'libekf:SourceHealth','Invalid excluded source list.');
+    assert(~isfield(packet,'source')||~any(strcmp(excluded,packet.source)), ...
+        'libekf:SourceHealth','Source excluded by a diagnostic report.');
     assert(~inertial||~isfield(packet,'retained_reference'),'libekf:Peer', ...
         'Retained reference correction is not an inertial propagation model.');
     stored_bank=isfield(filter,'reference_bank');
@@ -82,20 +89,30 @@ try
         end
     end
     if health
-        assert(stored_bank&&all(isfield(packet,{'source','lineage','quality','peer_id','valid', ...
-            't_measure','t_received','frame_id'})), 'libekf:PeerHealth','Incomplete reference health report.');
+        target='peer_id'; if source_health, target='target_source'; end
+        assert((stored_bank||source_health)&&all(isfield(packet,{'source','lineage','quality',target,'valid', ...
+            't_measure','t_received','frame_id'})), 'libekf:PeerHealth','Incomplete health report.');
         assert(ischar(packet.source)&&~isempty(packet.source)&& ...
             iscell(packet.lineage)&&~isempty(packet.lineage)&& ...
             all(cellfun(@(x)ischar(x)&&~isempty(x),packet.lineage))&& ...
-            strcmp(packet.quality,'VALID')&&ischar(packet.peer_id)&& ...
+            strcmp(packet.quality,'VALID')&&ischar(packet.(target))&&isrow(packet.(target))&&~isempty(packet.(target))&& ...
             islogical(packet.valid)&&isscalar(packet.valid)&&strcmp(packet.frame_id,filter.state.frame_id)&& ...
             isnumeric(packet.t_measure)&&isscalar(packet.t_measure)&&isreal(packet.t_measure)&& ...
             packet.t_measure==filter.state.t&&isnumeric(packet.t_received)&& ...
             isscalar(packet.t_received)&&isreal(packet.t_received)&&isfinite(packet.t_received)&& ...
             packet.t_received>=packet.t_measure, 'libekf:PeerHealth','Invalid reference health report.');
-        selected=find(strcmp(bank.ids,packet.peer_id));
-        assert(numel(selected)==1,'libekf:PeerHealth','Unknown reference health ID.');
-        bank.valid(selected)=packet.valid;
+        if source_health
+            selected=strcmp(excluded,packet.target_source);
+            if packet.valid
+                excluded(selected)=[];
+            elseif ~any(selected)
+                excluded{end+1}=packet.target_source;
+            end
+        else
+            selected=find(strcmp(bank.ids,packet.peer_id));
+            assert(numel(selected)==1,'libekf:PeerHealth','Unknown reference health ID.');
+            bank.valid(selected)=packet.valid;
+        end
         candidate=filter.state; Q=filter.P; ids=unique(packet.lineage(:));
     elseif inertial
         [candidate,Q,T]=nav_predict(filter.state,filter.P,packet,env);
@@ -167,6 +184,10 @@ try
     out.state=candidate; out.P=Q; out.used=[filter.used(:);ids];
     result.accepted=true; result.reason='Оценка обновлена; достоверность проверяет сторож';
     if health, result.reason='Признак исправности опоры обновлён'; end
+    if source_health
+        out.excluded_sources=excluded;
+        result.reason='Допуск источника обновлён по сообщению диагностики';
+    end
 catch ex
     if startsWith(ex.identifier,'libekf:')
         result.reason=ex.identifier;

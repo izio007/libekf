@@ -69,6 +69,8 @@ end
 function out=advance(in,imu,t,env)
 out=in;
 if t==in.state.t, return; end
+assert(~isfield(in,'excluded_sources')||~any(strcmp(in.excluded_sources,imu.source)), ...
+    'libekf:SourceHealth','Cannot propagate with an excluded inertial source.');
 part=imu; part.t_start=in.state.t; part.t_end=t;
 [out.state,out.P,T]=nav_predict(in.state,in.P,part,env);
 if isfield(in,'reference')
