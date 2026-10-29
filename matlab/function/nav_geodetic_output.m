@@ -1,6 +1,27 @@
 function out=nav_geodetic_output(s,P,env,control)
 % Geodetic output only; covariance is NOT a guarantee of integrity.
 % lat/lon in degrees, alt is ellipsoidal metres. No implicit MSL conversion.
+% Полный снимок автоматически передаёт происхождение и неустранённые отказы.
+if isstruct(s)&&isscalar(s)&&isfield(s,'state')
+    assert(nargin==4&&isempty(P)&&isfield(s,'P')&&isstruct(control)&&isscalar(control)&& ...
+        all(isfield(control,{'now','checks'})),'libekf:WatchOutput', ...
+        'Use nav_geodetic_output(filter,[],env,control) with publication time and checks.');
+    metadata=struct('state_time',s.state.t,'frame_id',s.state.frame_id);
+    for field={'source_history','sources_complete','excluded_sources','invalidated_sources'}
+        if isfield(s,field{1}), metadata.(field{1})=s.(field{1}); end
+    end
+    for field={'state_time','frame_id','source_history','sources_complete','excluded_sources','invalidated_sources'}
+        name=field{1};
+        if isfield(control,name)
+            assert(isfield(metadata,name)&&isequaln(control.(name),metadata.(name)), ...
+                'libekf:WatchOutput','Control cannot override snapshot provenance or unresolved faults.');
+        elseif isfield(metadata,name)
+            control.(name)=metadata.(name);
+        end
+    end
+    out=nav_geodetic_output(s.state,s.P,env,control);
+    return;
+end
 assert(isequal(size(P),[21 21]) && all(isfinite(P(:))) && ...
     norm(P-P.','fro')<=1e-12*max(norm(P,'fro'),realmin), 'libekf:Covariance','Invalid error covariance.');
 assert(strcmp(s.frame_id,env.frame_id),'libekf:Frame','Wrong common navigation anchor.');

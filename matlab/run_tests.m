@@ -3280,12 +3280,34 @@ control=struct('state_time',restored.state.t,'frame_id',restored.state.frame_id,
 published=nav_geodetic_output(restored.state,restored.P,e,control);
 assert(strcmp(published.quality.latitude,'ALARM')&&strcmp(published.quality.longitude,'ALARM')&& ...
     strcmp(published.quality.altitude,'ALARM'));
+% Полный снимок сам передаёт происхождение и не позволяет скрыть прежний отказ.
+publication=struct('now',restored.state.t+.2,'checks',struct());
+automatic=nav_geodetic_output(restored,[],e,publication);
+assert(strcmp(automatic.quality.altitude,'ALARM')&& ...
+    isequal(automatic.invalidated_sources,restored.invalidated_sources));
+assert(any(strcmp({automatic.sources.id},'failed_position_sensor'))&&automatic.age==publication.now-restored.state.t);
+manual=publication; manual.state_time=restored.state.t; manual.frame_id=restored.state.frame_id;
+manual.source_history=restored.source_history; manual.excluded_sources=restored.excluded_sources;
+manual.invalidated_sources=restored.invalidated_sources;
+explicit=nav_geodetic_output(restored.state,restored.P,e,manual);
+assert(isequaln(automatic,explicit));
+contradictory=publication; contradictory.invalidated_sources={};
+fails(@()nav_geodetic_output(restored,[],e,contradictory),'libekf:WatchOutput');
+contradictory=publication; contradictory.sources_complete=true;
+fails(@()nav_geodetic_output(restored,[],e,contradictory),'libekf:WatchOutput');
+contradictory=publication; contradictory.state_time=restored.state.t-1;
+fails(@()nav_geodetic_output(restored,[],e,contradictory),'libekf:WatchOutput');
+fails(@()nav_geodetic_output(restored,restored.P,e,publication),'libekf:WatchOutput');
 % До использования прибора полная история доказывает отсутствие его вклада.
 clean_initial=f; clean_initial.source_history=nav_sources([]); clean_initial.sources_complete=true;
 early_report=late_report; early_report.t_measure=f.state.t;
 [clean,accepted]=nav_replay(clean_initial,{u},{early_report,suspect},{[],sensor},e,1e8);
 assert(accepted.accepted&&~accepted.observations{2}.accepted&&~isfield(clean,'invalidated_sources'));
 close(clean.state.p,plain.state.p,1e-12); close(clean.P,plain.P,1e-12);
+clean_output=nav_geodetic_output(clean,[],e,struct('now',clean.state.t,'checks',struct()));
+assert(clean_output.sources_complete&&isempty(clean_output.invalidated_sources)&& ...
+    strcmp(clean_output.quality.altitude,'NOT_READY'));
+
 
 % Отказ ИНС внутри интервала не допускает продолжения по тем же данным.
 report.target_source=u.source; report.t_measure=mid.t;
