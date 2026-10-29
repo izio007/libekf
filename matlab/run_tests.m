@@ -1020,6 +1020,19 @@ c=m; c.t_measure=a.t+.75; c.t_received=u.t_end; c.lineage={'later_position'}; c.
 [y,info]=nav_assimilate_interval(f,u,{c,m},{sensor,sensor},e,100); assert(info.accepted);
 [z,info]=nav_assimilate_interval(f,u,{m,c},{sensor,sensor},e,100); assert(info.accepted);
 close(y.state.p,z.state.p,1e-12); close(y.jointP,z.jointP,1e-12);
+% Each source retains its age limit after chronological sorting.
+policy=struct('now',u.t_end,'max_age',0,'observation_max_age',[.2 .6]);
+[y,info]=nav_assimilate_interval(f,u,{c,m},{sensor,sensor},e,100,policy);
+assert(info.accepted&&~info.observations{1}.accepted&&info.observations{2}.accepted);
+assert(strcmp(info.observations{1}.reason,'libekf:Stale'));
+close(y.state.p,x.state.p,1e-12); close(y.jointP,x.jointP,1e-12);
+assert(isequal(y.used,x.used));
+policy.observation_max_age=[.6 .2];
+[z,info]=nav_assimilate_interval(f,u,{m,c},{sensor,sensor},e,100,policy);
+assert(info.accepted&&info.observations{1}.accepted&&~info.observations{2}.accepted);
+assert(isequal(y,z));
+policy.observation_max_age=-1;
+fails(@()nav_assimilate_interval(f,u,{m,c},{sensor,sensor},e,100,policy),'libekf:Time');
 % Rejected observations do not stop valid inertial motion or consume source IDs.
 u.noise_density=diag([4 4 4 0 0 0]);
 bad=m; bad.quality='FAILED';
@@ -1153,10 +1166,42 @@ first=K*world; first=(first(1:2,:)./first(3,:)).';
 second=K*rotation.'*world; second=(second(1:2,:)./second(3,:)).';
 d=nav_visual_ambiguity(first,second,K,training,limits);
 assert(d.geometry_ready&&strcmp(d.status,'AMBIGUOUS')&&d.rotation_explains&&d.plane_explains);
+% A few bad held-out correspondences must not conceal a dominant rotation explanation.
+outliers=second; indices=find(~training); outliers(indices(1),:)=outliers(indices(1),:)+[1000 -1000];
+robust=limits; robust.min_support=.9; robust.point_limit=1e-5;
+d=nav_visual_ambiguity(first,outliers,K,training,robust);
+assert(d.rotation_rms>100&&d.rotation_explains&&strcmp(d.status,'AMBIGUOUS'));
+close(d.rotation_support,14/15,1e-12);
+outliers(indices(2),:)=outliers(indices(2),:)+[1000 -1000];
+d=nav_visual_ambiguity(first,outliers,K,training,robust);
+assert(~d.rotation_explains&&~d.plane_explains&&strcmp(d.status,'UNASSESSED'));
+close(d.rotation_support,13/15,1e-12);
+% Bad fitting matches must not conceal rotation; checking points never select a model.
+contaminated=second; fit_indices=find(training);
+contaminated(fit_indices(1),:)=contaminated(fit_indices(1),:)+[1000 -1000];
+contaminated(indices(1),:)=contaminated(indices(1),:)+[1000 -1000];
+sampled=robust; sampled.fit_samples=[2 4 6 8];
+d=nav_visual_ambiguity(first,contaminated,K,training,sampled);
+assert(d.rotation_explains&&strcmp(d.status,'AMBIGUOUS'));
+close(d.rotation_support,14/15,1e-12);
+bad_samples=sampled; bad_samples.fit_samples=[2 2 6 8];
+fails(@()nav_visual_ambiguity(first,second,K,training,bad_samples),'libekf:Vision');
+bad=robust; bad.min_support=1.1;
+fails(@()nav_visual_ambiguity(first,second,K,training,bad),'libekf:Vision');
+
 world(3,:)=10; first=K*world; first=(first(1:2,:)./first(3,:)).';
 second=K*rotation.'*(world-[1;0;0]); second=(second(1:2,:)./second(3,:)).';
 d=nav_visual_ambiguity(first,second,K,training,limits);
 assert(d.geometry_ready&&strcmp(d.status,'AMBIGUOUS')&&d.plane_explains);
+% A planar scene remains ambiguous despite gross matches in both subsets.
+contaminated=second;
+contaminated(fit_indices(1),:)=contaminated(fit_indices(1),:)+[1000 -1000];
+contaminated(indices(1),:)=contaminated(indices(1),:)+[1000 -1000];
+sampled.fit_samples=[2 5 9 13];
+d=nav_visual_ambiguity(first,contaminated,K,training,sampled);
+assert(d.plane_explains&&strcmp(d.status,'AMBIGUOUS'));
+close(d.plane_support,14/15,1e-12);
+
 world(3,:)=10+2*sin((1:numel(x))*.7); first=K*world; first=(first(1:2,:)./first(3,:)).';
 second=K*rotation.'*(world-[1;0;0]); second=(second(1:2,:)./second(3,:)).';
 d=nav_visual_ambiguity(first,second,K,training,limits);

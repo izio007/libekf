@@ -5,6 +5,13 @@ assert(iscell(packets)&&iscell(sensors)&&numel(packets)==numel(sensors), ...
     'libekf:Packet','Expected matching observation and sensor cells.');
 out=filter; result=struct('accepted',false,'reason','','observations',{{}});
 args={}; if nargin>=7, args={reception}; end
+% max_age относится к ИНС; observation_max_age — к исходному порядку наблюдений.
+if nargin>=7&&isstruct(reception)&&isfield(reception,'observation_max_age')
+    ages=reception.observation_max_age;
+    assert(isnumeric(ages)&&isreal(ages)&&numel(ages)==numel(packets)&& ...
+        all(isfinite(ages(:)))&&all(ages(:)>=0), ...
+        'libekf:Time','One finite nonnegative age limit per observation required.');
+end
 assert(isfield(imu,'model')&&strcmp(imu.model,'inertial'), ...
     'libekf:Packet','Expected one inertial interval.');
 % Проверка исходного интервала, его происхождения и сохранённой опоры.
@@ -34,7 +41,12 @@ try
             trial=nav_save_reference(trial);
             checks{k}=struct('accepted',true,'reason','Опора сохранена','nis',NaN);
         else
-            [trial,checks{k}]=nav_assimilate(trial,packets{k},sensors{k},env,limit,args{:});
+            observation_args=args;
+            if nargin>=7&&isfield(reception,'observation_max_age')
+                policy=reception; policy.max_age=reception.observation_max_age(k);
+                observation_args={policy};
+            end
+            [trial,checks{k}]=nav_assimilate(trial,packets{k},sensors{k},env,limit,observation_args{:});
         end
         % Отвергнутое наблюдение не меняет даже разбиение интегрирования ИНС.
         if checks{k}.accepted, candidate=trial; end
