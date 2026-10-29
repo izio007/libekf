@@ -2893,7 +2893,21 @@ report=struct('model','source_health','source','watch','lineage',{{'exclude_sour
     't_measure',s.t,'t_received',u.t_end);
 models=source_models;
 for k=1:numel(models)
-    m=packet(mid,models{k}); m.frame='SENSOR_LOCAL'; report.target_source=m.source;
+    m=packet(mid,models{k}); m.frame='SENSOR_LOCAL';
+    % Причина двух тревог становится запретом только при явном ограничении числа отказов.
+    alarm=struct('status','ALARM','t',s.t,'interval',[s.t s.t], ...
+        'provenance_complete',true,'involved_sources',{{m.source,'aux_a'}});
+    second_alarm=alarm; second_alarm.involved_sources={m.source,'aux_b'};
+    policy=struct('max_faults',1,'max_hypotheses',8,'max_age',0,'max_span',0);
+    isolated=nav_isolate_sources({m.source,'aux_a','aux_b'},{alarm,second_alarm},s.t,policy);
+    assert(strcmp(isolated.status,'ISOLATED')&&isolated.complete&&numel(isolated.suspected_sources)==1);
+    report.target_source=isolated.suspected_sources{1};
+    [admitted,health]=nav_assimilate(f,report,[],e,1e8);
+    assert(health.accepted&&ismember(m.source,admitted.excluded_sources));
+    close(admitted.P,f.P,0); close(admitted.state.p,f.state.p,0);
+    policy.max_faults=2;
+    ambiguous=nav_isolate_sources({m.source,'aux_a','aux_b'},{alarm,second_alarm},s.t,policy);
+    assert(strcmp(ambiguous.status,'AMBIGUOUS')&&isempty(ambiguous.suspected_sources));
     [blocked,info]=nav_replay(f,{u},{report,m},{[],sensor},e,1e8);
     assert(info.accepted&&info.observations{1}.accepted&&~info.observations{2}.accepted);
     close(blocked.P,plain.P,1e-12); close(blocked.state.p,plain.state.p,1e-12);
