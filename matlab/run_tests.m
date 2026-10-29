@@ -1405,6 +1405,38 @@ for observation=1:2
     common_state=corrected;
 end
 assert(sum(strcmp(common_state.used,'range_calibration'))==1);
+% Запоздалая спутниковая поправка пересчитывает общие ошибки двух дальностей.
+first_range=common_range; first_range.lineage={'range_calibration','history_range_1'};
+first_range.z=range_packet.z+joint_advanced.future_noise.mean;
+[first_epoch,accepted]=nav_assimilate_interval(snapshot,joint_imu,{first_range},{range_sensor},motion,100);
+assert(accepted.accepted&&accepted.observations{1}.accepted);
+next_imu=joint_imu; next_imu.t_start=joint_imu.t_end; next_imu.t_end=next_imu.t_start+.1;
+next_imu.t_received=next_imu.t_end; next_imu.lineage={'joint_errors_imu_2'};
+next_imu.reference_motion.t_start=next_imu.t_start; next_imu.reference_motion.t_end=next_imu.t_end;
+gps=packet(first_epoch.state,'gnss_position'); gps.frame='SENSOR_LOCAL'; gps.lever=zeros(3,1);
+gps.t_measure=next_imu.t_start+.05; gps.t_received=gps.t_measure;
+gps.lineage={'joint_late_gps'}; gps.z=first_epoch.state.p+[.1;-.1;.2];
+gps.reference_noise_independent=true; gps.future_noise_independent=true;
+last_range=first_range; last_range.t_measure=next_imu.t_end; last_range.t_received=next_imu.t_end;
+last_range.lineage={'range_calibration','history_range_2'};
+[timely,accepted]=nav_assimilate_interval(first_epoch,next_imu,{gps,last_range},{range_sensor,range_sensor},motion,100);
+assert(accepted.accepted&&all(cellfun(@(x)x.accepted,accepted.observations)));
+gps.t_received=next_imu.t_end+.1;
+arrival=struct('now',gps.t_received,'max_age',1);
+[delayed,accepted]=nav_replay(snapshot,{joint_imu,next_imu},{last_range,gps,first_range}, ...
+    {range_sensor,range_sensor,range_sensor},motion,100,{[],arrival,[]});
+assert(accepted.accepted&&all(cellfun(@(x)x.accepted,accepted.observations)));
+close(delayed.state.p,timely.state.p,1e-11); close(delayed.state.v,timely.state.v,1e-11);
+close(delayed.P,timely.P,1e-11);
+close(delayed.reference_bank.position,timely.reference_bank.position,1e-11);
+close(delayed.reference_bank.covariance,timely.reference_bank.covariance,1e-11);
+close(delayed.reference_bank.cross_cov,timely.reference_bank.cross_cov,1e-11);
+close(delayed.future_noise.mean,timely.future_noise.mean,1e-11);
+close(delayed.future_noise.covariance,timely.future_noise.covariance,1e-11);
+close(delayed.future_noise.cross_cov,timely.future_noise.cross_cov,1e-11);
+close(delayed.future_noise.peer_cross_cov,timely.future_noise.peer_cross_cov,1e-11);
+assert(sum(strcmp(delayed.used,'range_calibration'))==1&&numel(delayed.used)==numel(timely.used));
+
 [unchanged,rejected]=nav_assimilate(common_state,common_range,range_sensor,motion,100);
 assert(~rejected.accepted&&isequal(unchanged,common_state));
 
