@@ -86,10 +86,11 @@ if nargin>=4
         usable=all(isfinite(J),2);
         if isfield(g,'history')
             assert(~any(isfield(g,{'H','R'}))&&isstruct(g.history)&&isscalar(g.history)&& ...
-                isfield(g.history,'frame_id')&&strcmp(g.history.frame_id,s.frame_id), ...
+                isfield(g.history,'frame_id'), ...
                 'libekf:WatchOutput','History geometry must end at the published state and use its axes.');
             geometry=nav_observability_sequence(g.history,g.scales,J(usable,:),g.relative_tolerance);
-            assert(geometry.t==s.t,'libekf:WatchOutput','History must end at the published epoch.');
+            assert(geometry.t==s.t&&strcmp(geometry.frame_id,s.frame_id), ...
+                'libekf:WatchOutput','History must end at the published epoch and frame.');
         else
             assert(all(isfield(g,{'H','R'})),'libekf:WatchOutput','Missing observation geometry.');
             geometry=nav_observability(g.H,g.R,g.scales,J(usable,:),g.relative_tolerance);

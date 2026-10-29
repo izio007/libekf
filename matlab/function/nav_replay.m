@@ -43,14 +43,49 @@ for k=1:n
     end
     epochs(k)=t;
 end
+% Один контекст на всю историю либо явный контекст каждого интервала.
+environments=env; if ~iscell(env), environments=repmat({env},size(intervals)); end
+assert(iscell(environments)&&numel(environments)==numel(intervals), ...
+    'libekf:Frame','One environment per inertial interval required.');
+for j=1:numel(environments)
+    frame=environments{j};
+    assert(isstruct(frame)&&isscalar(frame)&&all(isfield(frame,{'frame_id','C_e_l','origin_ecef'}))&& ...
+        ischar(frame.frame_id)&&isrow(frame.frame_id)&&~isempty(frame.frame_id)&& ...
+        isnumeric(frame.origin_ecef)&&isreal(frame.origin_ecef)&&numel(frame.origin_ecef)==3&& ...
+        all(isfinite(frame.origin_ecef(:))),'libekf:Frame','Invalid interval frame.');
+    nav_quaternion(frame.C_e_l);
+    for previous=1:j-1
+        known=environments{previous};
+        assert(~strcmp(known.frame_id,frame.frame_id)|| ...
+            (isequal(known.C_e_l,frame.C_e_l)&&isequal(known.origin_ecef(:),frame.origin_ecef(:))), ...
+            'libekf:Frame','One frame identity cannot denote different origins or axes.');
+    end
+end
+active=environments{1};
+if ~strcmp(initial.state.frame_id,active.frame_id), result.reason='libekf:Frame'; return; end
 candidate=initial; taken=false(1,n); steps={};
 for k=1:numel(intervals)
     u=intervals{k};
     assert(isstruct(u)&&isscalar(u)&&all(isfield(u,{'t_start','t_end'}))&& ...
         isscalar(u.t_start)&&isscalar(u.t_end)&&all(isfinite([u.t_start u.t_end])), ...
         'libekf:History','Invalid inertial interval in history.');
+    next=environments{k};
+    if ~strcmp(active.frame_id,next.frame_id)
+        times=candidate.state.t;
+        if isfield(candidate,'reference'), times=[candidate.reference.t;candidate.state.t]; end
+        try
+            [candidate,~,transition]=nav_change_frame(candidate,[],active,next);
+        catch ex
+            if startsWith(ex.identifier,'libekf:'), result.reason=ex.identifier; return; else, rethrow(ex); end
+        end
+        change=struct('accepted',true,'transition',transition,'state_times',times, ...
+            'from_frame_id',active.frame_id,'to_frame_id',next.frame_id);
+        steps{end+1}=struct('kind','change_frame','time',candidate.state.t, ...
+            'data',change,'interval_index',k);
+    end
+    active=next;
     selected=find(~taken&epochs>=u.t_start&epochs<=u.t_end);
-    [candidate,step]=nav_assimilate_interval(candidate,u,packets(selected),sensors(selected),env,limit);
+    [candidate,step]=nav_assimilate_interval(candidate,u,packets(selected),sensors(selected),active,limit);
     if ~step.accepted, result.reason=step.reason; return; end
     for j=1:numel(step.steps)
         record=step.steps{j}; record.interval_index=k;

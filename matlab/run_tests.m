@@ -2559,6 +2559,32 @@ assert(all(geometry.identified)); close(geometry.variance,[2*ones(3,1);6.5*ones(
 control.geometry.history=common_history;
 common_output=nav_geodetic_output(dependent.state,dependent.P,e,control);
 assert(all(common_output.observable)); close(common_output.measurement_variance(3),2,1e-9);
+% История меняет местные оси после граничного наблюдения и сохранения опоры.
+to=e; to.frame_id='history_new_local';
+to.C_e_l=e.C_e_l*nav_rotation([.9;.1;-.2;.3]/norm([.9;.1;-.2;.3]));
+to.origin_ecef=e.origin_ecef+[300;-200;50];
+[changed,changed_trace]=nav_replay(with_common,{imu,second},{packets{1},packets{2},save,packets{3}}, ...
+    {sensor,sensor,[],sensor},{e,to},100);
+assert(changed_trace.accepted&&all(cellfun(@(z)z.accepted,changed_trace.observations)));
+expected=nav_change_frame(dependent,[],e,to);
+close(changed.state.p,expected.state.p,1e-9); close(changed.jointP,expected.jointP,1e-10);
+close(changed.future_noise.mean,expected.future_noise.mean,1e-9);
+close(changed.future_noise.cross_cov,expected.future_noise.cross_cov,1e-10);
+assert(sum(cellfun(@(z)strcmp(z.kind,'change_frame'),changed_trace.steps))==1);
+frame_history=common_history; frame_history.steps=changed_trace.steps;
+geometry=nav_observability_sequence(frame_history,ones(21,1),target,1e-10);
+assert(strcmp(geometry.frame_id,to.frame_id));
+close(geometry.variance,[2*ones(3,1);6.5*ones(3,1)],1e-9);
+changed_control=control; changed_control.frame_id=to.frame_id; changed_control.geometry.history=frame_history;
+changed_output=nav_geodetic_output(changed.state,changed.P,to,changed_control);
+close(changed_output.measurement_variance,common_output.measurement_variance,1e-9);
+contradictory=to; contradictory.frame_id=e.frame_id;
+fails(@()nav_replay(with_common,{imu,second},{},{},{e,contradictory},100),'libekf:Frame');
+fails(@()nav_replay(with_common,{imu,second},{},{},{e},100),'libekf:Frame');
+broken=second; broken.t_start=broken.t_start+.01;
+[unchanged,rejected]=nav_replay(with_common,{imu,broken},{},{},{e,to},100);
+assert(~rejected.accepted&&isequal(unchanged,with_common)&&isempty(rejected.steps));
+
 
 unknown=compiled; unknown.noise_independent=false;
 fails(@()nav_observability_sequence(unknown,ones(21,1),target,1e-10),'libekf:Correlation');
@@ -2834,6 +2860,24 @@ for k=1:numel(models)
     end
 
     assert(replayed.state.t==u.t_end&&numel(replayed.used)==2);
+    % Каждый источник обрабатывается после смены общей системы, в своих исходных осях.
+    to=e; to.frame_id='timing_new_local';
+    to.C_e_l=e.C_e_l*nav_rotation([.9;.1;-.2;.3]/norm([.9;.1;-.2;.3]));
+    to.origin_ecef=e.origin_ecef+[300;-200;50];
+    part1=u; part1.t_end=s.t+.03125; part1.lineage={'frame_interval_1'};
+    part2=u; part2.t_start=part1.t_end; part2.lineage={'frame_interval_2'};
+    shifted=m;
+    if isfield(shifted,'peer_cross_frame_id')
+        [~,~,J]=nav_change_frame(s,eye(21),e,to);
+        shifted.peer_cross_frame_id=to.frame_id; shifted.peer_cross_cov=J*shifted.peer_cross_cov;
+    end
+    [fixed,accepted]=nav_replay(f,{part1,part2},{m},{sensor},e,1e8); assert(accepted.accepted);
+    [changed,accepted]=nav_replay(f,{part1,part2},{shifted},{sensor},{e,to},1e8);
+    assert(accepted.accepted&&accepted.observations{1}.accepted,'libekf:Frame', ...
+        'Frame history rejected %s: %s',models{k},accepted.observations{1}.reason);
+    expected=nav_change_frame(fixed,[],e,to);
+    close(changed.state.p,expected.state.p,1e-8); close(changed.P,expected.P,1e-8);
+
     % Каждая физическая модель сохраняет результат после закрытия старой истории.
     dated=m; dated.lineage_times=m.t_measure;
     [bounded_result,bounded_info]=nav_replay(checkpoint,{timed_imu},{dated},{sensor},e,1e8);
