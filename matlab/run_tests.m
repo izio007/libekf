@@ -1556,7 +1556,13 @@ m.lineage={'new_frame_a','new_frame_b'}; m.z=[1000;0;0];
 [unchanged,info]=nav_assimilate(f,m,[],e,.01); assert(~info.accepted&&isequal(unchanged,f));
 
 % Replacing the saved epoch must not create information or erase provenance.
-saved=nav_save_reference(f); assert(isequal(saved.state,f.state)&&isequal(saved.P,f.P));
+[saved,change]=nav_save_reference(f); assert(isequal(saved.state,f.state)&&isequal(saved.P,f.P));
+close(change.transition*f.jointP*change.transition.',saved.jointP,1e-12);
+assert(isequal(change.input_times,[f.reference.t;f.state.t]));
+single=rmfield(f,{'reference','jointP'});
+[cloned,change]=nav_save_reference(single);
+close(change.transition*single.P*change.transition.',cloned.jointP,1e-12);
+assert(isequal(size(change.transition),[42 21])&&change.input_times==single.state.t);
 assert(isequal(saved.used,f.used)&&isequal(saved.reference,saved.state));
 close(saved.jointP,[f.P f.P;f.P f.P],1e-12);
 u.t_start=saved.state.t; u.t_end=u.t_start+.1; u.t_received=u.t_end;
@@ -1643,7 +1649,7 @@ old=late; old.t_measure=a.t-.5; old.lineage={'before_snapshot'};
 assert(ri.accepted&&~ri.observations{3}.accepted&&isequal(again,replayed));
 broken=second; broken.t_start=broken.t_start+.1;
 [same,ri]=nav_replay(f,{u,broken},{late},{sensor},e,100);
-assert(~ri.accepted&&isequal(same,f)); % No partially reconstructed result escapes a history gap.
+assert(~ri.accepted&&isequal(same,f)&&isempty(ri.steps)); % Не выдавать части отвергнутой истории.
 % Camera reference changes are replayed as actions, without inventing measurements.
 cam=struct('model','visual_odometry','source','camera','lineage',{{'frame_a','frame_b'}}, ...
     'quality','VALID','noise_model','independent','correlation_group','camera','frame_id',a.frame_id, ...
@@ -1654,6 +1660,15 @@ cam2=cam; cam2.t_start=second.t_start; cam2.t_end=second.t_end;
 cam2.t_received=second.t_end; cam2.lineage={'frame_c','frame_d'};
 save=struct('model','save_reference','t_measure',u.t_end);
 [replayed,ri]=nav_replay(f,{u,second},{late,cam,save,cam2},{sensor,[],[],[]},e,100);
+% Индексы относятся к исходному списку, а модели заново получены по хронологии.
+events=ri.steps(cellfun(@(z)isfield(z,'packet_index'),ri.steps));
+assert(isequal(cellfun(@(z)z.packet_index,events),[1 2 3 4]));
+assert(isequal(cellfun(@(z)z.interval_index,events),[1 1 1 2]));
+assert(strcmp(events{3}.kind,'save_reference'));
+assert(isequal(size(events{3}.data.reference_change.transition),[42 42]));
+[again_trace,again_info]=nav_replay(f,{u,second},{late,cam,save,cam2},{sensor,[],[],[]},e,100);
+assert(isequal(again_trace,replayed)&&isequaln(again_info.steps,ri.steps));
+
 camera_policy=struct('now',second.t_end,'max_age',second.t_end-cam.t_end);
 [camera_admitted,camera_check]=nav_replay(f,{u,second},{late,cam,save,cam2}, ...
     {sensor,[],[],[]},e,100,{[],camera_policy,[],[]});
@@ -2465,6 +2480,13 @@ for k=1:numel(models)
     close(replayed.state.v,reference.state.v,1e-10);
     close(nav_rotation(replayed.state.q),nav_rotation(reference.state.q),1e-10);
     close(replayed.P,reference.P,1e-10);
+    [~,direct]=nav_assimilate_interval(f,u,{m},{sensor},e,1e8);
+    assert(numel(info.steps)==numel(direct.steps));
+    for j=1:numel(info.steps)
+        assert(info.steps{j}.interval_index==1);
+        assert(isequaln(rmfield(info.steps{j},'interval_index'),direct.steps{j}));
+    end
+
     assert(replayed.state.t==u.t_end&&numel(replayed.used)==2);
     % Каждая физическая модель сохраняет результат после закрытия старой истории.
     dated=m; dated.lineage_times=m.t_measure;

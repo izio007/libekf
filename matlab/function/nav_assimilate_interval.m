@@ -45,8 +45,9 @@ try
         [trial,propagation]=advance(candidate,imu,epochs(k),env);
         if strcmp(packets{k}.model,'save_reference')
             % Явное действие истории: снимок не добавляет измерительной информации.
-            trial=nav_save_reference(trial);
-            checks{k}=struct('accepted',true,'reason','Опора сохранена','nis',NaN);
+            [trial,reference_change]=nav_save_reference(trial);
+            checks{k}=struct('accepted',true,'reason','Опора сохранена','nis',NaN, ...
+                'reference_change',reference_change);
         else
             observation_args=args;
             if nargin>=7&&isfield(reception,'observation_max_age')

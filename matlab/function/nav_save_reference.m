@@ -1,4 +1,4 @@
-function out=nav_save_reference(filter)
+function [out,record]=nav_save_reference(filter)
 % Сохранить текущее состояние как опору; это не новое измерение.
 % Старая опора заменяется, история использованных исходных данных сохраняется.
 P=filter.P;
@@ -14,6 +14,13 @@ assert(isscalar(filter.state.t)&&isfinite(filter.state.t)&& ...
 nav_rotation(filter.state.q);
 assert(iscell(filter.used)&&all(cellfun(@(x)ischar(x)&&~isempty(x),filter.used)), ...
     'libekf:Lineage','Invalid source history.');
+selector=eye(21); input_times=filter.state.t;
+if isfield(filter,'reference')
+    selector=[zeros(21) eye(21)]; input_times=[filter.reference.t;filter.state.t];
+end
+record=struct('transition',[selector;selector], ...
+    'input_times',input_times,'output_times',[filter.state.t;filter.state.t], ...
+    'frame_id',filter.state.frame_id);
 out=filter; out.reference=filter.state; out.jointP=[P P;P P];
 if isfield(filter,'reference_bank')
     cross=filter.reference_bank.cross_cov;

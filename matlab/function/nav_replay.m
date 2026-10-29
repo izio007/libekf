@@ -5,7 +5,7 @@ function [out,result]=nav_replay(initial,intervals,packets,sensors,env,limit,adm
 % Это не добавление старых поправок к текущей оценке; исходная история не очищается.
 assert(iscell(intervals)&&~isempty(intervals)&&iscell(packets)&&iscell(sensors)&& ...
     numel(packets)==numel(sensors),'libekf:History','Expected inertial history and paired observation cells.');
-out=initial; result=struct('accepted',false,'reason','','observations',{{}});
+out=initial; result=struct('accepted',false,'reason','','observations',{{}},'steps',{{}});
 n=numel(packets); epochs=Inf(1,n); checks=cell(size(packets));
 if nargin<7, admission=cell(size(packets)); end
 assert(iscell(admission)&&numel(admission)==n, ...
@@ -43,7 +43,7 @@ for k=1:n
     end
     epochs(k)=t;
 end
-candidate=initial; taken=false(1,n);
+candidate=initial; taken=false(1,n); steps={};
 for k=1:numel(intervals)
     u=intervals{k};
     assert(isstruct(u)&&isscalar(u)&&all(isfield(u,{'t_start','t_end'}))&& ...
@@ -52,8 +52,13 @@ for k=1:numel(intervals)
     selected=find(~taken&epochs>=u.t_start&epochs<=u.t_end);
     [candidate,step]=nav_assimilate_interval(candidate,u,packets(selected),sensors(selected),env,limit);
     if ~step.accepted, result.reason=step.reason; return; end
+    for j=1:numel(step.steps)
+        record=step.steps{j}; record.interval_index=k;
+        if isfield(record,'packet_index'), record.packet_index=selected(record.packet_index); end
+        steps{end+1}=record;
+    end
     checks(selected)=step.observations; taken(selected)=true;
 end
 out=candidate; result.accepted=true; result.reason='История пересчитана от исходного снимка';
-result.observations=checks;
+result.observations=checks; result.steps=steps;
 end
