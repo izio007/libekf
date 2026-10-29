@@ -998,6 +998,54 @@ end
 
 
 function requirement_correlated_measurement
+% Принятое измерение меняет распределение общей ошибки следующего измерения.
+[s,e]=fixture; sensor=struct('id',s.frame_id,'origin_ecef',e.origin_ecef,'C_e_s',e.C_e_l);
+f=struct('state',s,'P',eye(21),'used',{{}},'capacity',10);
+first=packet(s,'gnss_position'); first.frame='SENSOR_LOCAL'; first.lever=zeros(3,1);
+first.z=s.p+[2;0;0]; first.R=eye(3); first.lineage={'shared_calibration','first_sample'};
+future=struct('ids',{{'next_x','next_y','next_z'}},'units',{{'m','m','m'}}, ...
+    'mean',zeros(3,1),'covariance',eye(3),'cross_cov',zeros(21,3), ...
+    'measurement_cross_cov',.5*eye(3),'state_times',s.t,'frame_id',s.frame_id);
+first.future_noise=future;
+[conditioned,info]=nav_assimilate(f,first,sensor,e,100); assert(info.accepted);
+future=info.future_noise_update;
+close(future.mean,[.5;0;0],1e-12); close(future.covariance,.875*eye(3),1e-12);
+close(future.cross_cov,[-.25*eye(3);zeros(18,3)],1e-12);
+assert(~isfield(future,'measurement_cross_cov'));
+second=rmfield(first,'future_noise'); second.z=s.p+[4;0;0];
+second.lineage={'shared_calibration','second_sample'}; second.R=future.covariance;
+second.state_noise_cov=future.cross_cov; second.state_noise_frame_id=s.frame_id;
+second.noise_model='joint_required';
+second.reuse=struct('lineage',{{'shared_calibration'}},'history',{conditioned.used}, ...
+    'state_times',future.state_times,'noise_mean',future.mean);
+[combined,accepted]=nav_assimilate(conditioned,second,sensor,e,100); assert(accepted.accepted);
+% Совместное аналитическое решение: R=[1 .5;.5 1], P0=1.
+close(combined.state.p,s.p+[12/7;0;0],1e-12);
+close(combined.P(1:3,1:3),(3/7)*eye(3),1e-12);
+% Сохранённая опора сохраняет ту же общую ошибку, а не независимую копию.
+paired=nav_save_reference(f); with_pair=first;
+with_pair.future_noise.cross_cov=zeros(42,3); with_pair.future_noise.state_times=[s.t;s.t];
+[~,accepted]=nav_assimilate(paired,with_pair,sensor,e,100); assert(accepted.accepted);
+close(accepted.future_noise_update.mean,future.mean,1e-12);
+close(accepted.future_noise_update.cross_cov,[future.cross_cov;future.cross_cov],1e-12);
+% Единицы будущей ошибки не влияют на полученную физическую поправку.
+scaled=first; scaled.future_noise.mean=1e6*scaled.future_noise.mean;
+scaled.future_noise.covariance=1e12*scaled.future_noise.covariance;
+scaled.future_noise.cross_cov=1e6*scaled.future_noise.cross_cov;
+scaled.future_noise.measurement_cross_cov=1e6*scaled.future_noise.measurement_cross_cov;
+scaled.future_noise.units={'um','um','um'};
+[same,accepted]=nav_assimilate(f,scaled,sensor,e,100); assert(accepted.accepted);
+close(same.P,conditioned.P,1e-12); close(accepted.future_noise_update.mean/1e6,future.mean,1e-12);
+close(accepted.future_noise_update.covariance/1e12,future.covariance,1e-12);
+bad=first; bad.future_noise.measurement_cross_cov=2*eye(3);
+[same,rejected]=nav_assimilate(f,bad,sensor,e,100);
+assert(~rejected.accepted&&strcmp(rejected.reason,'libekf:Correlation')&&isequal(same,f));
+[same,rejected]=nav_assimilate(f,first,sensor,e,.01);
+assert(~rejected.accepted&&isequal(same,f)&&~isfield(rejected,'future_noise_update'));
+bad=first; bad.future_noise.state_times=s.t-1;
+[same,rejected]=nav_assimilate(f,bad,sensor,e,100);
+assert(~rejected.accepted&&strcmp(rejected.reason,'libekf:Correlation')&&isequal(same,f));
+
 [s,~]=fixture; P=eye(21); H=zeros(1,21); H(1)=1;
 o=struct('frame_id',s.frame_id,'t_measure',s.t,'noise_model','joint_required', ...
     'H',H,'R',1,'residual',2,'state_noise_cov',zeros(21,1));

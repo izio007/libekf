@@ -173,6 +173,10 @@ try
             obs.t_start=reference.t; obs.t_end=filter.state.t;
         end
     end
+    if isfield(packet,'future_noise')
+        assert(~inertial&&~health,'libekf:Correlation','Future-noise conditioning requires an observation.');
+        obs.future_noise=packet.future_noise;
+    end
     overlap=intersect(ids,filter.used(:));
     if ~isempty(overlap)
         fresh=ids(~ismember(ids,filter.used));
@@ -229,6 +233,7 @@ try
         source_history=nav_sources(source_history,packet);
     end
     if ~inertial&&~health&&isfield(info,'peer_update'), result.peer_update=info.peer_update; end
+    if ~inertial&&~health&&isfield(info,'future_noise_update'), result.future_noise_update=info.future_noise_update; end
     if stored_bank
         if ~inertial&&~health
             update=info.peer_update;

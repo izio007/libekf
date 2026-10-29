@@ -147,6 +147,34 @@ if isfield(obs,'peer_jacobian')
         norm(C-expectedC,'fro')<=1e-12*max(norm(C,'fro'),realmin), ...
         'libekf:Correlation','Reference and effective observation errors disagree.');
 end
+if isfield(obs,'future_noise')
+    future=obs.future_noise;
+    assert(~isfield(obs,'peer_jacobian')&&isstruct(future)&&isscalar(future)&& ...
+        all(isfield(future,{'ids','units','mean','covariance','cross_cov', ...
+        'measurement_cross_cov','state_times','frame_id'})), ...
+        'libekf:Correlation','Incomplete future-noise model or missing joint reference dependence.');
+    future_dimension=numel(future.mean); epochs=cellfun(@(x)x.t,states).';
+    assert(future_dimension>0&&isnumeric(future.mean)&&isreal(future.mean)&&isvector(future.mean)&& ...
+        all(isfinite(future.mean(:)))&&iscell(future.ids)&&numel(future.ids)==future_dimension&& ...
+        all(cellfun(@(x)ischar(x)&&isrow(x)&&~isempty(x),future.ids))&& ...
+        numel(unique(future.ids))==future_dimension&&iscell(future.units)&&numel(future.units)==future_dimension&& ...
+        all(cellfun(@(x)ischar(x)&&isrow(x)&&~isempty(x),future.units))&& ...
+        isequal(future.state_times(:),epochs(:))&&strcmp(future.frame_id,obs.frame_id), ...
+        'libekf:Correlation','Invalid future-noise identities, units, epochs or axes.');
+    Vfuture=future.covariance; Ufuture=future.cross_cov; Dfuture=future.measurement_cross_cov;
+    assert(isnumeric(Vfuture)&&isnumeric(Ufuture)&&isnumeric(Dfuture)&& ...
+        isequal(size(Vfuture),[future_dimension future_dimension])&&isequal(size(Ufuture),[dimension future_dimension])&& ...
+        isequal(size(Dfuture),[future_dimension n]),'libekf:Correlation','Invalid future-noise dimensions.');
+    joint=[P C Ufuture;C.' R Dfuture.';Ufuture.' Dfuture Vfuture];
+    assert(isreal(joint)&&all(isfinite(joint(:)))&&all(diag(joint)>=0)&& ...
+        norm(joint-joint.','fro')<=1e-12*max(norm(joint,'fro'),realmin), ...
+        'libekf:Correlation','Invalid joint future-noise covariance.');
+    scales=sqrt(diag(joint)); zero=scales==0;
+    assert(~any(any(joint(zero,:)~=0)),'libekf:Correlation','Impossible zero-variance dependence.');
+    scales(zero)=1; normalized=(joint./scales)./scales.'; values=eig((normalized+normalized.')/2);
+    assert(min(values)>=-100*eps*size(joint,1)*max(1,max(abs(values))), ...
+        'libekf:Correlation','Inconsistent future-noise dependence.');
+end
 info=nav_innovation(P,obs); info.accepted=info.nis<=limit;
 candidate=s; Q=P;
 if ~info.accepted, return; end
@@ -173,6 +201,22 @@ for k=1:numel(states)
 end
 Q=G*Q*G.'; Q=(Q+Q.')/2;
 info.error_reset=G;
+if isfield(obs,'future_noise')
+    Bfuture=(Ufuture.'*H.'+Dfuture)./info.scale.';
+    L=((Bfuture/info.factor.')/info.factor)./info.scale.';
+    prior=[P Ufuture;Ufuture.' Vfuture]; gain=[K;L];
+    A=eye(dimension+future_dimension)-gain*[H zeros(n,future_dimension)]; cross=[C;Dfuture];
+    joint=A*prior*A.'+gain*R*gain.'-A*cross*gain.'-gain*cross.'*A.';
+    reset=blkdiag(G,eye(future_dimension)); joint=reset*joint*reset.'; joint=(joint+joint.')/2;
+    future=rmfield(future,'measurement_cross_cov');
+    future.mean=future.mean(:)+L*obs.residual(:);
+    future.covariance=joint(dimension+(1:future_dimension),dimension+(1:future_dimension));
+    future.cross_cov=joint(1:dimension,dimension+(1:future_dimension));
+    assert(all(isfinite(joint(:)))&&all(isfinite(future.mean)), ...
+        'libekf:Covariance','Future-noise conditioning overflow.');
+    info.future_noise_update=future;
+end
+
 assert(all(isfinite(Q(:))),'libekf:Covariance','Correction covariance overflow.');
 % Совместно уточняем опорный объект, чтобы его ошибка не стала независимой снова.
 if isfield(obs,'peer_jacobian')
