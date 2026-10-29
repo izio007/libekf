@@ -2412,6 +2412,59 @@ m=struct('model','visual_odometry','mode','epipolar','source','visible_camera', 
 m.R=diag([repmat([.04;.04;1e-6;.04;.04;1e-6],n,1);ones(6,1)*1e-4]);
 m.units=[repmat({'pixel';'pixel';'s';'pixel';'pixel';'s'},n,1);repmat({'rad/s'},6,1)];
 o=nav_odometry_measurement(a,b,m); close(o.residual,zeros(n,1),1e-12);
+% LEKF-025: ускорение внутри кадра не должно создавать ложную геометрическую невязку.
+accelerated=m; acceleration=[20 -15;-10 12;5 -4];
+accelerated.row_motion.acceleration=acceleration;
+accelerated.row_motion.acceleration_unit='m/s^2';
+accelerated.row_motion.acceleration_frame_id=a.frame_id;
+accelerated.row_motion.acceleration_valid=true;
+accelerated.R=blkdiag(m.R,.1*eye(6));
+accelerated.units=[m.units;repmat({'m/s^2'},6,1)];
+for k=1:n
+    for j=1:2
+        state=states{j}; offset=m.z(k,3*j)-state.t;
+        rotation=nav_rotation(state.q)*expm(nav_skew(rates(:,j)*offset));
+        position=state.p+state.v*offset+.5*acceleration(:,j)*offset^2+rotation*lever;
+        camera_point=D.'*rotation.'*(landmarks(:,k)-position);
+        pixel=K*camera_point; accelerated.z(k,3*j-2:3*j-1)=pixel(1:2).'/pixel(3);
+    end
+end
+accelerated_observation=nav_odometry_measurement(a,b,accelerated);
+close(accelerated_observation.residual,zeros(n,1),1e-12);
+constant=m; constant.z=accelerated.z;
+assert(norm(nav_odometry_measurement(a,b,constant).residual)>1e-7);
+for j=[3 6 6*n+7:6*n+12]
+    plus=accelerated; minus=accelerated;
+    if j<=6
+        plus.z(1,j)=plus.z(1,j)+1e-6; minus.z(1,j)=minus.z(1,j)-1e-6;
+    else
+        index=j-6*n-6;
+        plus.row_motion.acceleration(index)=plus.row_motion.acceleration(index)+1e-4;
+        minus.row_motion.acceleration(index)=minus.row_motion.acceleration(index)-1e-4;
+    end
+    step=1e-6; if j>6, step=1e-4; end
+    op=nav_odometry_measurement(a,b,plus); om=nav_odometry_measurement(a,b,minus);
+    close((op.residual-om.residual)/(2*step),accelerated_observation.noise_transform(:,j),1e-8);
+end
+% Ускорение и его погрешность меняют оси вместе с состоянием.
+rotated=e; rotated.frame_id='accelerated_local';
+rotated.C_e_l=nav_rotation([.9;.1;.2;.3]/norm([.9;.1;.2;.3]));
+rotated.origin_ecef=e.origin_ecef+[10;20;30];
+[changed,~]=nav_change_frame({a,b},eye(42),e,rotated);
+T=rotated.C_e_l.'*e.C_e_l; input_rotation=blkdiag(eye(6*n+6),T,T);
+transformed=accelerated; transformed.frame_id=rotated.frame_id;
+transformed.row_motion.acceleration=T*acceleration;
+transformed.row_motion.acceleration_frame_id=rotated.frame_id;
+transformed.R=input_rotation*accelerated.R*input_rotation.';
+transformed_observation=nav_odometry_measurement(changed{1},changed{2},transformed);
+close(transformed_observation.residual,accelerated_observation.residual,1e-12);
+close(transformed_observation.R,accelerated_observation.R,1e-12);
+close(transformed_observation.noise_transform*input_rotation,accelerated_observation.noise_transform,1e-10);
+bad=accelerated; bad.row_motion.acceleration_unit='g';
+fails(@()nav_odometry_measurement(a,b,bad),'libekf:Acceleration');
+bad=accelerated; bad.row_motion.acceleration_valid=false;
+fails(@()nav_odometry_measurement(a,b,bad),'libekf:Acceleration');
+
 assert(norm(o.H(:,4:6),'fro')>0&&norm(o.H(:,13:15),'fro')>0);
 numeric=zeros(n,42);
 for j=1:42
@@ -2447,6 +2500,14 @@ correlated=nav_odometry_measurement(a,b,dependent);
 close(correlated.state_noise_cov,dependent.state_noise_cov*o.noise_transform.',1e-12);
 prior=b; prior.p=prior.p+[.1;-.05;0];
 filter=struct('state',prior,'P',eye(21),'reference',a,'jointP',eye(42),'used',{{}},'capacity',20);
+moving=accelerated; moving.noise_model='joint_required'; moving.state_noise_frame_id=a.frame_id;
+moving.state_noise_cov=zeros(42,size(moving.R,1)); moving.state_noise_cov(1,end)=.001;
+moving_before=nav_odometry_measurement(a,prior,moving);
+[moving_result,moving_info]=nav_assimilate(filter,moving,[],e,1000);
+assert(moving_info.accepted);
+moving_after=nav_odometry_measurement(moving_result.reference,moving_result.state,moving);
+assert(norm(moving_after.residual)<norm(moving_before.residual)&&trace(moving_result.jointP)<trace(filter.jointP));
+
 before=nav_odometry_measurement(a,prior,m);
 [updated,info]=nav_assimilate(filter,m,[],e,1000); assert(info.accepted);
 after=nav_odometry_measurement(updated.reference,updated.state,m);

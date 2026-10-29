@@ -177,6 +177,20 @@ assert(isnumeric(z)&&isreal(z)&&size(z,2)==6&&size(z,1)>=1&&all(isfinite(z(:))),
     'libekf:Dimension','Expected rows x1,y1,t1,x2,y2,t2.');
 n=size(z,1); dimension=6*n+6;
 expected=[repmat({'pixel';'pixel';'s';'pixel';'pixel';'s'},n,1);repmat({'rad/s'},6,1)];
+acceleration=zeros(3,2);
+accelerated=isstruct(motion)&&any(isfield(motion, ...
+    {'acceleration','acceleration_unit','acceleration_frame_id','acceleration_valid'}));
+if accelerated
+    assert(isscalar(motion)&&all(isfield(motion, ...
+        {'acceleration','acceleration_unit','acceleration_frame_id','acceleration_valid'}))&& ...
+        isnumeric(motion.acceleration)&&isreal(motion.acceleration)&& ...
+        isequal(size(motion.acceleration),[3 2])&&all(isfinite(motion.acceleration(:)))&& ...
+        strcmp(motion.acceleration_unit,'m/s^2')&&strcmp(motion.acceleration_frame_id,a.frame_id)&& ...
+        isequal(motion.acceleration_valid,true), ...
+        'libekf:Acceleration','Prepared Earth-relative local acceleration required.');
+    acceleration=motion.acceleration; dimension=dimension+6;
+    expected=[expected;repmat({'m/s^2'},6,1)];
+end
 assert(iscell(m.units)&&isequal(m.units(:),expected),'libekf:Units','Invalid timed ray units.');
 assert(isequal(size(K),[3 3])&&isreal(K)&&all(isfinite(K(:)))&& ...
     isequal(K(3,:),[0 0 1])&&K(2,1)==0&&K(1,1)>0&&K(2,2)>0&& ...
@@ -205,8 +219,8 @@ assert(isempty(normalized)||min(eig(full((normalized+normalized.')/2)))>=-100*ep
     'libekf:Covariance','Indefinite raw ray covariance.');
 f=zeros(n,1); H=zeros(n,42); G=zeros(n,dimension);
 for k=1:n
-    one=row_ray(a,z(k,1:3),motion.body_rates(:,1),K,D,lever);
-    two=row_ray(b,z(k,4:6),motion.body_rates(:,2),K,D,lever);
+    one=row_ray(a,z(k,1:3),motion.body_rates(:,1),K,D,lever,acceleration(:,1));
+    two=row_ray(b,z(k,4:6),motion.body_rates(:,2),K,D,lever,acceleration(:,2));
     delta=two.position-one.position;
     assert(norm(delta)>motion.min_baseline,'libekf:Geometry','Ray baseline is undefined.');
     g=cross(one.ray,two.ray); first_ray=cross(two.ray,delta); second_ray=cross(delta,one.ray);
@@ -217,6 +231,10 @@ for k=1:n
         g.'*two.position_input+second_ray.'*two.ray_input];
     G(k,6*n+1:6*n+3)=-g.'*one.position_rate+first_ray.'*one.ray_rate;
     G(k,6*n+4:6*n+6)=g.'*two.position_rate+second_ray.'*two.ray_rate;
+    if accelerated
+        G(k,6*n+7:6*n+9)=-g.'*one.position_acceleration;
+        G(k,6*n+10:6*n+12)=g.'*two.position_acceleration;
+    end
 end
 R=G*C*G.'; R=(R+R.')/2;
 assert(all(isfinite(f))&&all(isfinite(H(:)))&&all(isfinite(R(:))), ...
@@ -231,7 +249,7 @@ if isfield(m,'state_noise_cov')
 end
 end
 
-function out=row_ray(s,measurement,rate,K,D,lever)
+function out=row_ray(s,measurement,rate,K,D,lever,acceleration)
 tau=measurement(3)-s.t; w=rate-s.bg(:); phi=w*tau; V=nav_skew(phi); angle=norm(phi);
 if angle<1e-4
     Jr=eye(3)-.5*V+(1/6)*(V*V);
@@ -240,7 +258,7 @@ else
 end
 Q=nav_rotation(s.q); E=expm(V); A=Q*E;
 pixel=K\[measurement(1:2).';1]; ray_body=D*pixel;
-out.position=s.p(:)+s.v(:)*tau+A*lever; out.ray=A*ray_body;
+out.position=s.p(:)+s.v(:)*tau+.5*acceleration*tau^2+A*lever; out.ray=A*ray_body;
 out.position_state=zeros(3,21); out.ray_state=zeros(3,21);
 out.position_state(:,1:3)=eye(3); out.position_state(:,4:6)=tau*eye(3);
 out.position_state(:,7:9)=-Q*nav_skew(E*lever);
@@ -248,6 +266,7 @@ out.ray_state(:,7:9)=-Q*nav_skew(E*ray_body);
 out.position_rate=-A*nav_skew(lever)*Jr*tau;
 out.ray_rate=-A*nav_skew(ray_body)*Jr*tau;
 out.position_state(:,13:15)=-out.position_rate; out.ray_state(:,13:15)=-out.ray_rate;
-out.position_input=[zeros(3,2) s.v(:)+A*nav_skew(w)*lever];
+out.position_acceleration=.5*tau^2*eye(3);
+out.position_input=[zeros(3,2) s.v(:)+acceleration*tau+A*nav_skew(w)*lever];
 out.ray_input=[A*D*(K\[eye(2);zeros(1,2)]) A*nav_skew(w)*ray_body];
 end
