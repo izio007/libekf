@@ -2019,6 +2019,37 @@ b.quality='VALID'; fails(@()nav_compare_sources(a,b,2*eye(3),10,cfg),'libekf:Cov
 watch=struct('windows',[1 2 3],'max_gap',1,'max_age',1,'capacity',10, ...
     'instant_limit',1.5,'mean_limit',[10 10 10],'rms_limit',[10 10 10]);
 [~,alarm]=nav_watch([],sample,10,watch); assert(strcmp(alarm.status,'ALARM'));
+% LEKF-012/020: смена реального состава не сохраняет готовность старой истории.
+a.value=zeros(3,1); b.value=zeros(3,1);
+a.input_sources={'imu','gnss'}; a.provenance_complete=true;
+b.input_sources={'gnss','dme'}; b.provenance_complete=true;
+[first,shared]=nav_compare_sources(a,b,.5*eye(3),10,cfg);
+assert(strcmp(shared.provenance,'SHARED_INPUTS')&&isequal(shared.shared_sources,{'gnss'}));
+history=[];
+for t=7:10
+    check=first; check.t=t; [history,ready]=nav_watch(history,check,t,watch);
+end
+assert(strcmp(ready.status,'CONSISTENT'));
+a.t=11; b.t=11; b.input_sources={'radio'};
+[changed,disjoint]=nav_compare_sources(a,b,.5*eye(3),11,cfg);
+assert(strcmp(disjoint.provenance,'DISJOINT_DECLARED_INPUTS')&&isempty(disjoint.shared_sources));
+[reset,result]=nav_watch(history,changed,11,watch);
+assert(strcmp(result.status,'NOT_READY')&&numel(reset.t)==1);
+% Порядок аргументов и порядок перечисления приборов не меняют саму проверку.
+a.value=[1;2;3]; a.input_sources={'gnss','imu','imu'};
+cross=[.2 .1 0;0 .3 0;0 0 .1];
+[forward,~]=nav_compare_sources(a,b,cross,11,cfg);
+[reverse,~]=nav_compare_sources(b,a,cross.',11,cfg);
+assert(strcmp(forward.context,reverse.context)); close(forward.value,reverse.value,1e-12);
+unknown=rmfield(b,'provenance_complete');
+[~,result]=nav_compare_sources(a,unknown,cross,11,cfg);
+assert(strcmp(result.provenance,'UNKNOWN'));
+renamed=b; renamed.source='third';
+[different,~]=nav_compare_sources(a,renamed,cross,11,cfg);
+assert(~strcmp(different.context,forward.context));
+bad=b; bad.input_sources={''};
+fails(@()nav_compare_sources(a,bad,cross,11,cfg),'libekf:Comparison');
+
 end
 
 function requirement_navigation_outage

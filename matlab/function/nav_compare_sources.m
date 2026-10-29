@@ -1,6 +1,7 @@
 function [sample,result]=nav_compare_sources(a,b,cross_cov,now,cfg)
 % Сравнение двух оценок одной физической величины; не определяет виновный источник.
-sample=[]; result=struct('status','NOT_READY','reason','','nis',NaN);
+sample=[]; result=struct('status','NOT_READY','reason','','nis',NaN, ...
+    'shared_sources',{{}},'provenance','UNKNOWN');
 required={'value','covariance','quantity','units','frame_id','t','quality','source'};
 for k=1:numel(required)
     assert(isfield(a,required{k})&&isfield(b,required{k}),'libekf:Comparison','Incomplete source estimate.');
@@ -20,6 +21,28 @@ assert(strcmp(a.quantity,b.quantity)&&strcmp(a.frame_id,b.frame_id)&& ...
     isequal(a.units,b.units)&&ischar(a.source)&&ischar(b.source)&& ...
     ~isempty(a.source)&&~isempty(b.source)&&~strcmp(a.source,b.source), ...
     'libekf:Comparison','Compare distinct sources of the same quantity, units and frame.');
+% Единый порядок сохраняет знак ряда при перестановке аргументов.
+[~,order]=sort({a.source,b.source});
+if order(1)==2, tmp=a; a=b; b=tmp; cross_cov=cross_cov.'; end
+[inputs_a,complete_a]=source_inputs(a);
+[inputs_b,complete_b]=source_inputs(b);
+result.shared_sources=intersect(inputs_a,inputs_b);
+if ~isempty(result.shared_sources)
+    result.provenance='SHARED_INPUTS';
+elseif complete_a&&complete_b
+    result.provenance='DISJOINT_DECLARED_INPUTS';
+end
+assert(ischar(a.quantity)&&isrow(a.quantity)&&~isempty(a.quantity)&& ...
+    ischar(a.frame_id)&&isrow(a.frame_id)&&~isempty(a.frame_id)&& ...
+    iscell(a.units)&&~isempty(a.units)&& ...
+    all(cellfun(@(x)ischar(x)&&isrow(x)&&~isempty(x),a.units)), ...
+    'libekf:Comparison','Invalid quantity, axes or units.');
+% Длины полей исключают совпадение разных имён, содержащих разделители.
+tokens=[{cfg.context;a.source;b.source;a.quantity;a.frame_id;num2str(numel(a.units))}; ...
+    a.units(:);{num2str(complete_a);num2str(numel(inputs_a))};inputs_a(:); ...
+    {num2str(complete_b);num2str(numel(inputs_b))};inputs_b(:)];
+context='';
+for k=1:numel(tokens), context=[context sprintf('%d:',numel(tokens{k})) tokens{k}]; end
 x=a.value(:); y=b.value(:); n=numel(x);
 assert(n>0&&numel(y)==n&&all(isfinite([x;y]))&& ...
     isequal(size(a.covariance),[n n])&&isequal(size(b.covariance),[n n])&& ...
@@ -38,9 +61,24 @@ scale=sqrt(diag(S)); normalized=(S./scale)./scale.';
 if flag~=0, result.reason='Вырожденная погрешность сравнения'; return; end
 value=L\((x-y)./scale); result.nis=value.'*value;
 assert(all(isfinite(value))&&isfinite(result.nis),'libekf:Comparison','Comparison overflow.');
-sample=struct('t',a.t,'value',value,'context',cfg.context);
+sample=struct('t',a.t,'value',value,'context',context);
 result.status='CONSISTENT'; result.reason='Расхождение в заданных пределах; общие ошибки не исключены';
 if result.nis>cfg.limit
     result.status='DISAGREEMENT'; result.reason='Источники расходятся; причина не определена';
+end
+end
+
+function [inputs,complete]=source_inputs(source)
+inputs={}; complete=false;
+if isfield(source,'input_sources')
+    inputs=source.input_sources;
+    assert(iscell(inputs)&&all(cellfun(@(x)ischar(x)&&isrow(x)&&~isempty(x),inputs)), ...
+        'libekf:Comparison','Invalid physical input source identities.');
+    inputs=unique(inputs(:));
+end
+if isfield(source,'provenance_complete')
+    complete=source.provenance_complete;
+    assert(islogical(complete)&&isscalar(complete)&&(~complete||~isempty(inputs)), ...
+        'libekf:Comparison','Complete provenance requires physical input sources.');
 end
 end
