@@ -226,6 +226,9 @@ obs=struct('predicted',f,'residual',-f,'H',H,'R',R,'noise_transform',-G, ...
     't_received',m.t_received,'source',m.source,'lineage',{m.lineage}, ...
     'noise_model',m.noise_model,'correlation_group',m.correlation_group);
 obs=attach_dependence(obs,m);
+if isfield(m,'state_noise_cov')
+    obs.input_noise_cov=m.R; obs.state_input_cov=m.state_noise_cov;
+end
 end
 
 function out=row_ray(s,measurement,rate,K,D,lever)

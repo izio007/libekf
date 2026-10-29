@@ -2215,6 +2215,42 @@ fails(@()nav_odometry_measurement(a,b,bad),'libekf:Time');
 zero_a=a; zero_b=b; zero_a.v=zeros(3,1); zero_b.v=zeros(3,1); zero_b.p=zero_a.p;
 bad=m; bad.lever=zeros(3,1);
 fails(@()nav_odometry_measurement(zero_a,zero_b,bad),'libekf:Geometry');
-[~,accepted]=nav_assimilate(filter,dependent,[],e,1000); assert(accepted.accepted);
+[dependent_update,accepted]=nav_assimilate(filter,dependent,[],e,1000); assert(accepted.accepted);
+% Невозможная исходная зависимость отклоняется, даже если исчезает в проекции на невязку.
+invisible=null(before.noise_transform); bad=dependent;
+bad.state_noise_cov=zeros(size(dependent.state_noise_cov)); bad.state_noise_cov(1,:)=100*invisible(:,1).';
+assert(norm(bad.state_noise_cov*before.noise_transform.','fro')<1e-10);
+[unchanged,rejected]=nav_assimilate(filter,bad,[],e,1000);
+assert(~rejected.accepted&&strcmp(rejected.reason,'libekf:Correlation')&&isequal(unchanged,filter));
+inconsistent=nav_odometry_measurement(a,prior,dependent); inconsistent.R=2*inconsistent.R;
+fails(@()nav_correct({a,prior},eye(42),inconsistent,1000),'libekf:Correlation');
+
+% Полная поправка сохраняется при смене местного начала и осей, включая общие ошибки.
+to=e; to.frame_id='timed_camera_other_axes';
+to.C_e_l=e.C_e_l*nav_rotation([.9;.1;-.2;.3]/norm([.9;.1;-.2;.3]));
+to.origin_ecef=e.origin_ecef+[300;-200;50];
+[states,Pnew,J]=nav_change_frame({a,prior},eye(42),e,to);
+rotated_filter=filter; rotated_filter.reference=states{1}; rotated_filter.state=states{2};
+rotated_filter.jointP=Pnew; rotated_filter.P=Pnew(22:42,22:42);
+for correlated_case=[false true]
+    packet=m; expected=updated;
+    if correlated_case, packet=dependent; expected=dependent_update; end
+    old_observation=nav_odometry_measurement(a,prior,packet);
+    packet.frame_id=to.frame_id;
+    if correlated_case
+        packet.state_noise_frame_id=to.frame_id; packet.state_noise_cov=J*packet.state_noise_cov;
+    end
+    new_observation=nav_odometry_measurement(states{1},states{2},packet);
+    close(new_observation.residual,old_observation.residual,1e-11);
+    close(new_observation.H*J,old_observation.H,1e-10);
+    close(new_observation.R,old_observation.R,1e-12);
+    close(new_observation.noise_transform,old_observation.noise_transform,1e-10);
+    [actual,accepted]=nav_assimilate(rotated_filter,packet,[],to,1000); assert(accepted.accepted);
+    [converted,covariance]=nav_change_frame({expected.reference,expected.state},expected.jointP,e,to);
+    close(actual.reference.p,converted{1}.p,1e-10); close(actual.state.p,converted{2}.p,1e-10);
+    close(actual.state.v,converted{2}.v,1e-10);
+    close(nav_rotation(actual.state.q),nav_rotation(converted{2}.q),1e-10);
+    close(actual.jointP,covariance,1e-10);
+end
 
 end
