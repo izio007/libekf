@@ -4,7 +4,7 @@ base=fileparts(mfilename('fullpath')); addpath(fullfile(base,'function'));
 cases={@requirement_source_models,@requirement_coordinates_and_terrain, ...
     @requirement_numerical_invariance,@requirement_broad_radar,@requirement_common_correction, ...
     @requirement_source_provenance,@requirement_inertial_motion,@requirement_watch_intervals, ...
-    @requirement_terrain_sequence,@requirement_all_source_fusion,@requirement_relative_camera_motion,@requirement_joint_correction,@requirement_visual_ambiguity,@requirement_correlated_measurement,@requirement_source_comparison,@requirement_navigation_outage,@requirement_interval_observations,@requirement_observable_quantities,@requirement_all_source_timing};
+    @requirement_terrain_sequence,@requirement_all_source_fusion,@requirement_relative_camera_motion,@requirement_joint_correction,@requirement_visual_ambiguity,@requirement_correlated_measurement,@requirement_source_comparison,@requirement_navigation_outage,@requirement_interval_observations,@requirement_observable_quantities,@requirement_all_source_timing,@requirement_timed_rays};
 names={'Показания соответствуют физическим моделям источников', ...
     'Смена координат сохраняет результат; неоднозначность рельефа не скрывается', ...
     'Мера расхождения сохраняется при смене единиц и масштаба', ...
@@ -23,7 +23,8 @@ names={'Показания соответствуют физическим мо�
     'Общая оценка продолжается без спутников и отклоняет ложную координату', ...
     'Измерения внутри инерциального интервала учитываются в своё время', ...
     'Исправные источники определяют только наблюдаемые величины', ...
-    'Все источники учитывают своё время при пересчёте истории'};
+    'Все источники учитывают своё время при пересчёте истории', ...
+    'Времена строк и погрешности лучей камеры входят в общую поправку'};
 checks=repmat(struct('requirement','','passed',false,'error',''),1,numel(cases));
 for k=1:numel(cases)
     checks(k).requirement=names{k};
@@ -2132,4 +2133,88 @@ for k=1:numel(models)
     [replayed,info]=nav_replay(f,{u},{m},{sensor},e,1e8);
     assert(info.accepted&&~info.observations{1}.accepted&&isequal(replayed,plain));
 end
+end
+
+function requirement_timed_rays
+[a,e]=fixture; a.p=zeros(3,1); a.q=[1;0;0;0]; a.bg=zeros(3,1); a.v=[2;1;.1];
+b=a; b.t=a.t+.2; b.p=[.5;.1;.02]; b.v=[3;-.4;.2]; b.q=[cos(.04);0;sin(.04);0];
+rates=[.1 -.2;.2 .1;0 .05]; K=[250 0 160;0 260 120;0 0 1];
+D=nav_rotation([cos(.03);0;0;sin(.03)]); lever=[.2;.05;0];
+stream=RandStream('mt19937ar','Seed',41); n=12;
+landmarks=[2*rand(stream,2,n)-1;4+4*rand(stream,1,n)];
+z=zeros(n,6); states={a,b};
+for k=1:n
+    for j=1:2
+        state=states{j}; offset=.018*(k-1)/(n-1)-.009;
+        if j==2, offset=-offset; end
+        rotation=nav_rotation(state.q)*expm(nav_skew(rates(:,j)*offset));
+        position=state.p+state.v*offset+rotation*lever;
+        camera_point=D.'*rotation.'*(landmarks(:,k)-position);
+        pixel=K*camera_point; z(k,3*j-2:3*j)=[pixel(1:2).'/pixel(3),state.t+offset];
+    end
+end
+motion=struct('body_rates',rates,'epochs',[a.t b.t],'unit','rad/s','reference','earth', ...
+    'valid',true,'bias_included',true,'max_offset',.02,'min_baseline',.01);
+m=struct('model','visual_odometry','mode','epipolar','source','visible_camera', ...
+    'lineage',{{'row_frame_1','row_frame_2'}},'quality','VALID','noise_model','independent', ...
+    'correlation_group','camera','frame_id',a.frame_id,'t_start',a.t,'t_end',b.t, ...
+    't_received',b.t+.05,'z',z,'intrinsics',K,'camera_to_body',D,'lever',lever, ...
+    'scale_valid',false,'calibration_valid',true,'matches_valid',true,'scene_static',true,'row_motion',motion);
+m.R=diag([repmat([.04;.04;1e-6;.04;.04;1e-6],n,1);ones(6,1)*1e-4]);
+m.units=[repmat({'pixel';'pixel';'s';'pixel';'pixel';'s'},n,1);repmat({'rad/s'},6,1)];
+o=nav_odometry_measurement(a,b,m); close(o.residual,zeros(n,1),1e-12);
+assert(norm(o.H(:,4:6),'fro')>0&&norm(o.H(:,13:15),'fro')>0);
+numeric=zeros(n,42);
+for j=1:42
+    delta=zeros(21,1); index=mod(j-1,21)+1; delta(index)=1e-6;
+    if j<=21
+        plus=nav_odometry_measurement(nav_apply_error(a,delta),b,m);
+        minus=nav_odometry_measurement(nav_apply_error(a,-delta),b,m);
+    else
+        plus=nav_odometry_measurement(a,nav_apply_error(b,delta),m);
+        minus=nav_odometry_measurement(a,nav_apply_error(b,-delta),m);
+    end
+    numeric(:,j)=-(plus.residual-minus.residual)/(2e-6);
+end
+close(numeric,o.H,1e-8);
+for j=[1:6 6*n+1 6*n+5]
+    plus=m; minus=m;
+    if j<=6*n
+        row=ceil(j/6); column=mod(j-1,6)+1;
+        plus.z(row,column)=plus.z(row,column)+1e-6; minus.z(row,column)=minus.z(row,column)-1e-6;
+    else
+        plus.row_motion.body_rates(j-6*n)=plus.row_motion.body_rates(j-6*n)+1e-6;
+        minus.row_motion.body_rates(j-6*n)=minus.row_motion.body_rates(j-6*n)-1e-6;
+    end
+    op=nav_odometry_measurement(a,b,plus); om=nav_odometry_measurement(a,b,minus);
+    close((op.residual-om.residual)/(2e-6),o.noise_transform(:,j),1e-8);
+end
+close(o.R,o.noise_transform*m.R*o.noise_transform.',1e-12);
+shifted_a=a; shifted_b=b; shifted_a.p=a.p+[100;200;-30]; shifted_b.p=b.p+[100;200;-30];
+close(nav_odometry_measurement(shifted_a,shifted_b,m).residual,o.residual,1e-12);
+dependent=m; dependent.noise_model='joint_required'; dependent.state_noise_frame_id=a.frame_id;
+dependent.state_noise_cov=zeros(42,size(m.R,1)); dependent.state_noise_cov(1,1)=.001;
+correlated=nav_odometry_measurement(a,b,dependent);
+close(correlated.state_noise_cov,dependent.state_noise_cov*o.noise_transform.',1e-12);
+prior=b; prior.p=prior.p+[.1;-.05;0];
+filter=struct('state',prior,'P',eye(21),'reference',a,'jointP',eye(42),'used',{{}},'capacity',20);
+before=nav_odometry_measurement(a,prior,m);
+[updated,info]=nav_assimilate(filter,m,[],e,1000); assert(info.accepted);
+after=nav_odometry_measurement(updated.reference,updated.state,m);
+assert(norm(after.residual)<norm(before.residual)&&trace(updated.jointP)<trace(filter.jointP));
+[unchanged,rejected]=nav_assimilate(updated,m,[],e,1000);
+assert(~rejected.accepted&&isequal(unchanged,updated));
+bad=m; bad.z(1,3)=a.t+.03;
+fails(@()nav_odometry_measurement(a,b,bad),'libekf:Time');
+bad=m; bad.scene_static=false;
+fails(@()nav_odometry_measurement(a,b,bad),'libekf:Quality');
+bad=m; bad.units{3}='ms';
+fails(@()nav_odometry_measurement(a,b,bad),'libekf:Units');
+bad=m; bad.row_motion.bias_included=false;
+fails(@()nav_odometry_measurement(a,b,bad),'libekf:Time');
+zero_a=a; zero_b=b; zero_a.v=zeros(3,1); zero_b.v=zeros(3,1); zero_b.p=zero_a.p;
+bad=m; bad.lever=zeros(3,1);
+fails(@()nav_odometry_measurement(zero_a,zero_b,bad),'libekf:Geometry');
+[~,accepted]=nav_assimilate(filter,dependent,[],e,1000); assert(accepted.accepted);
+
 end
