@@ -55,6 +55,8 @@ try
         if checks{k}.accepted, candidate=trial; end
     end
     candidate=advance(candidate,imu,imu.t_end,env);
+    source_history=[]; if isfield(candidate,'source_history'), source_history=candidate.source_history; end
+    candidate.source_history=nav_sources(source_history,imu);
     out=candidate; result.accepted=true; result.reason='Интервал обработан по времени измерений';
     result.observations=checks;
 catch ex

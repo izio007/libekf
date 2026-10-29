@@ -51,6 +51,19 @@ for k=1:numel(models)
     m=packet(s,models{k}); m.frame='SENSOR_LOCAL';
     [a,ra]=nav_assimilate(f,m,sensor0,e,1e8);
     assert(ra.accepted,'libekf:AllSources','%s rejected: %s',models{k},ra.reason);
+    control=struct('state_time',a.state.t,'frame_id',a.state.frame_id,'now',a.state.t+.5, ...
+        'checks',struct(),'source_history',a.source_history,'sources_complete',true);
+    published=nav_geodetic_output(a.state,a.P,e,control);
+    assert(published.age==.5&&published.sources_complete&&numel(published.sources)==1);
+    assert(strcmp(published.sources.id,m.source)&&strcmp(published.sources.models{1},m.model)&& ...
+        published.sources.age==.5&&~published.sources.excluded);
+    control.excluded_sources={m.source}; control=rmfield(control,'sources_complete');
+    published=nav_geodetic_output(a.state,a.P,e,control);
+    assert(published.sources.excluded&&~published.sources_complete);
+    future=f; future.source_history=a.source_history; future.source_history.last_epoch=s.t+1;
+    [unchanged,failed]=nav_assimilate(future,m,sensor0,e,1e8);
+    assert(~failed.accepted&&strcmp(failed.reason,'libekf:SourceHistory')&&isequal(unchanged,future));
+
     % Те же физические данные, записанные в иных местных осях прибора.
     original=m; original.frame='ECEF';
     native=nav_packet_from_ecef(original,adapter); native.frame='SENSOR_LOCAL';
@@ -2099,6 +2112,11 @@ for k=1:numel(models)
     close(nav_rotation(replayed.state.q),nav_rotation(reference.state.q),1e-10);
     close(replayed.P,reference.P,1e-10);
     assert(replayed.state.t==u.t_end&&numel(replayed.used)==2);
+    inertial_source=replayed.source_history(strcmp({replayed.source_history.id},u.source));
+    measured_source=replayed.source_history(strcmp({replayed.source_history.id},m.source));
+    assert(inertial_source.first_epoch==u.t_start&&inertial_source.last_epoch==u.t_end);
+    assert(measured_source.first_epoch==m.t_measure&&measured_source.last_epoch==m.t_measure);
+
     % Each physical model obeys reception and age constraints before entering replay.
     admission=struct('now',m.t_received,'max_age',m.t_received-m.t_measure);
     [admitted,info]=nav_replay(f,{u},{m},{sensor},e,1e8,{admission});

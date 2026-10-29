@@ -22,6 +22,7 @@ else
     J(1:2,:)=NaN; out.quality.latitude='CHART_SINGULAR'; out.quality.longitude='UNDEFINED';
 end
 out.covariance=J*P*J.'; out.jacobian=J;
+out.age=[]; out.sources=nav_sources([]); out.sources_complete=false;
 % Проверки назначаются каждой выходной величине явно; согласие не означает VALID.
 if nargin>=4
     assert(isstruct(control)&&isscalar(control)&& ...
@@ -31,6 +32,23 @@ if nargin>=4
         control.now>=s.t&&isfield(control,'checks')&&isstruct(control.checks), ...
         'libekf:WatchOutput','Control must refer to this state and processing time.');
     out.checked_at=control.now; out.checks=control.checks;
+    out.age=control.now-s.t;
+    if isfield(control,'source_history')
+        out.sources=nav_sources(control.source_history);
+        assert(all([out.sources.last_epoch]<=s.t),'libekf:SourceHistory','Source contribution is newer than the state.');
+        excluded={}; if isfield(control,'excluded_sources'), excluded=control.excluded_sources; end
+        assert(iscell(excluded)&&all(cellfun(@(x)ischar(x)&&isrow(x)&&~isempty(x),excluded)), ...
+            'libekf:SourceHistory','Invalid excluded source identities.');
+        for j=1:numel(out.sources)
+            out.sources(j).age=control.now-out.sources(j).last_epoch;
+            out.sources(j).excluded=any(strcmp(excluded,out.sources(j).id));
+        end
+    end
+    if isfield(control,'sources_complete')
+        assert(isfield(control,'source_history')&&islogical(control.sources_complete)&&isscalar(control.sources_complete), ...
+            'libekf:SourceHistory','Source-history completeness must be explicit.');
+        out.sources_complete=control.sources_complete;
+    end
     names={'latitude','longitude','altitude'};
     for k=1:numel(names)
         name=names{k}; status='NOT_READY';

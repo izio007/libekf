@@ -174,6 +174,15 @@ try
             result.reason='Превышено допустимое расхождение'; return;
         end
     end
+    if ~health
+        source_history=[];
+        if isfield(filter,'source_history')
+            source_history=nav_sources(filter.source_history);
+            assert(all([source_history.last_epoch]<=filter.state.t), ...
+                'libekf:SourceHistory','Source history is newer than the input state.');
+        end
+        source_history=nav_sources(source_history,packet);
+    end
     if ~inertial&&~health&&isfield(info,'peer_update'), result.peer_update=info.peer_update; end
     if stored_bank
         if ~inertial&&~health
@@ -189,6 +198,7 @@ try
     end
     if paired, out.reference=reference; out.jointP=J; end
     out.state=candidate; out.P=Q; out.used=[filter.used(:);ids];
+    if ~health, out.source_history=source_history; end
     result.accepted=true; result.reason='Оценка обновлена; достоверность проверяет сторож';
     if health, result.reason='Признак исправности опоры обновлён'; end
     if source_health
