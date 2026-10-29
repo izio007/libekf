@@ -70,6 +70,22 @@ if isfield(obs,'peer_covariance') || isfield(obs,'peer_cross_cov')
     assert(min(values)>=-100*eps*(dimension+3)*max(1,max(abs(values))), ...
         'libekf:Correlation','Inconsistent joint own/peer covariance.');
 end
+if isfield(obs,'peer_jacobian')
+    assert(all(isfield(obs,{'peer_covariance','peer_cross_cov','peer_noise_cov','peer_position','peer_time'})), ...
+        'libekf:Peer','Incomplete reference update data.');
+    Hp=obs.peer_jacobian; N=obs.peer_noise_cov;
+    assert(isequal(size(Hp),[n 3])&&all(isfinite(Hp(:)))&& ...
+        isequal(size(N),[n n])&&all(isfinite(N(:)))&& ...
+        norm(N-N.','fro')<=1e-12*max(norm(N,'fro'),realmin)&& ...
+        isequal(size(obs.peer_position),[3 1])&&all(isfinite(obs.peer_position))&& ...
+        isscalar(obs.peer_time)&&isfinite(obs.peer_time), ...
+        'libekf:Peer','Invalid reference update data.');
+    [~,flag]=chol(N); assert(flag==0,'libekf:Covariance','Invalid raw range covariance.');
+    expectedR=N+Hp*obs.peer_covariance*Hp.'; expectedC=obs.peer_cross_cov*Hp.';
+    assert(norm(R-expectedR,'fro')<=1e-12*max(norm(R,'fro'),realmin)&& ...
+        norm(C-expectedC,'fro')<=1e-12*max(norm(C,'fro'),realmin), ...
+        'libekf:Correlation','Reference and effective observation errors disagree.');
+end
 info=nav_innovation(P,obs); info.accepted=info.nis<=limit;
 candidate=s; Q=P;
 if ~info.accepted, return; end
@@ -96,4 +112,21 @@ for k=1:numel(states)
 end
 Q=G*Q*G.'; Q=(Q+Q.')/2;
 assert(all(isfinite(Q(:))),'libekf:Covariance','Correction covariance overflow.');
+% Совместно уточняем опорный объект, чтобы его ошибка не стала независимой снова.
+if isfield(obs,'peer_jacobian')
+    Hp=obs.peer_jacobian; V=obs.peer_covariance; U=obs.peer_cross_cov;
+    assert(isequal(size(Hp),[n 3])&&all(isfinite(Hp(:)))&& ...
+        isequal(size(obs.peer_noise_cov),[n n]),'libekf:Peer','Invalid peer observation geometry.');
+    Bp=(U.'*H.'+V*Hp.')./info.scale.';
+    Kp=((Bp/info.factor.')/info.factor)./info.scale.';
+    prior=[P U;U.' V]; gain=[K;Kp]; A=eye(dimension+3)-gain*[H Hp];
+    joint=A*prior*A.'+gain*obs.peer_noise_cov*gain.';
+    reset=blkdiag(G,eye(3)); joint=reset*joint*reset.'; joint=(joint+joint.')/2;
+    assert(all(isfinite(joint(:))),'libekf:Covariance','Peer correction overflow.');
+    info.peer_update=struct('position',obs.peer_position+Kp*obs.residual(:), ...
+        'covariance',joint(dimension+(1:3),dimension+(1:3)), ...
+        'cross_cov',joint(1:dimension,dimension+(1:3)), ...
+        'frame_id',obs.frame_id,'t',obs.peer_time);
+end
+
 end

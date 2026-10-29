@@ -95,6 +95,7 @@ try
             result.reason='Превышено допустимое расхождение'; return;
         end
     end
+    if ~inertial&&isfield(info,'peer_update'), result.peer_update=info.peer_update; end
     if paired, out.reference=reference; out.jointP=J; end
     out.state=candidate; out.P=Q; out.used=[filter.used(:);ids];
     result.accepted=true; result.reason='Оценка обновлена; достоверность проверяет сторож';

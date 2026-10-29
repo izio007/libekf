@@ -361,6 +361,10 @@ if ~isempty(derived_cross)
     obs.state_noise_cov=derived_cross;
     obs.peer_covariance=m.peer_covariance;
     obs.peer_cross_cov=m.peer_cross_cov;
+    obs.peer_jacobian=-direction.';
+    obs.peer_noise_cov=m.R;
+    obs.peer_position=m.station(:);
+    obs.peer_time=m.peer_time;
 end
 if isfield(m,'state_noise_cov')
     U=m.state_noise_cov;

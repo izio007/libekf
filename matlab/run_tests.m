@@ -777,6 +777,66 @@ fails(@()nav_correct(s,P,o,100),'libekf:Correlation');
 o.state_noise_cov(1)=.5; o.noise_model='independent';
 fails(@()nav_correct(s,P,o,100),'libekf:Correlation');
 
+% Repeated ranges share station-position error; compare with the joint linear solution.
+[s,e]=fixture; s.q=[1;0;0;0]; P=eye(21); P(1,1)=4;
+m=packet(s,'dme_range'); m.lever=zeros(3,1); m.station=s.p-[10;0;0];
+m.z=10; m.R=10; m.noise_model='joint_required';
+m.state_noise_cov=zeros(21,1); m.state_noise_frame_id=s.frame_id;
+o=nav_measurement(s,m,e); [a,Q,info]=nav_correct(s,P,o,100); assert(info.accepted);
+close(a.p,s.p,1e-12); close(Q(1,1),20/7,1e-12);
+% Station variance 9 and independent range variance 1. Conditioning on the first
+% zero residual gives Var(v2|z1)=10-81/14 and Cov(error_x,v2|z1)=-36/14.
+m.z=11; m.R=59/14; m.state_noise_cov=zeros(21,1); m.state_noise_cov(1)=-18/7;
+m.state_noise_frame_id=s.frame_id;
+o=nav_measurement(a,m,e); [b,V,info]=nav_correct(a,Q,o,100); assert(info.accepted);
+close(b.p,s.p+[4/27;0;0],1e-12); close(V(1,1),76/27,1e-12);
+% Joint observation covariance [10 9;9 10] yields the same posterior.
+H=zeros(2,21); H(:,1)=1;
+joint=struct('frame_id',s.frame_id,'t_measure',s.t,'noise_model','joint_required', ...
+    'H',H,'R',[10 9;9 10],'residual',[0;1],'state_noise_cov',zeros(21,2));
+[batch,B,info]=nav_correct(s,P,joint,100); assert(info.accepted);
+close(batch.p,b.p,1e-12); close(B,V,1e-12);
+
+% The uncertain-reference model computes the conditional reference errors itself.
+m=packet(s,'cooperative_range'); m.lever=zeros(3,1); m.station=s.p-[10;0;0];
+m.peer_covariance=diag([9 1 1]); m.peer_cross_cov=zeros(21,3);
+m.noise_model='joint_required'; m.z=10; m.R=1;
+o=nav_measurement(s,m,e); [a,Q,first_info]=nav_correct(s,P,o,100);
+assert(first_info.accepted); ref=first_info.peer_update;
+bad_reference=o; bad_reference.peer_noise_cov=2;
+fails(@()nav_correct(s,P,bad_reference,100),'libekf:Correlation');
+close(ref.covariance(1,1),45/14,1e-12); close(ref.cross_cov(1,1),18/7,1e-12);
+m.station=ref.position; m.peer_covariance=ref.covariance; m.peer_cross_cov=ref.cross_cov; m.z=11;
+o=nav_measurement(a,m,e); [b,V,second_info]=nav_correct(a,Q,o,100);
+assert(second_info.accepted); close(b.p,batch.p,1e-12); close(V,B,1e-12);
+o.residual=1e6; [unchanged,unchangedP,rejected]=nav_correct(a,Q,o,1);
+assert(~rejected.accepted&&~isfield(rejected,'peer_update')&&isequal(unchanged,a)&&isequal(unchangedP,Q));
+
+% The common handler returns reference errors in common axes, even for rotated sensors.
+T=[0 -1 0;1 0 0;0 0 1]; offset=[7;-3;2];
+sensor=struct('id','rotated_peer','origin_ecef',e.origin_ecef+e.C_e_l*offset,'C_e_s',e.C_e_l*T);
+filter=struct('state',s,'P',P,'used',{{}},'capacity',10);
+m=packet(s,'cooperative_range'); m.frame='SENSOR_LOCAL'; m.frame_id=sensor.id;
+m.lever=zeros(3,1); m.station=T.'*(s.p-[10;0;0]-offset);
+m.peer_covariance=T.'*diag([9 1 1])*T; m.peer_cross_cov=zeros(21,3);
+m.peer_cross_frame_id=s.frame_id; m.noise_model='joint_required'; m.R=1; m.z=10;
+m.lineage={'reference_range_first'};
+[filter,r1]=nav_assimilate(filter,m,sensor,e,100);
+assert(r1.accepted&&isfield(r1,'peer_update'));
+close(r1.peer_update.position,ref.position,1e-8);
+close(r1.peer_update.covariance,ref.covariance,1e-8);
+close(r1.peer_update.cross_cov,ref.cross_cov,1e-8);
+assert(strcmp(r1.peer_update.frame_id,s.frame_id)&&r1.peer_update.t==s.t);
+m.station=T.'*(r1.peer_update.position-offset);
+m.peer_covariance=T.'*r1.peer_update.covariance*T;
+m.peer_cross_cov=r1.peer_update.cross_cov*T; m.z=11; m.lineage={'reference_range_second'};
+[filter,r2]=nav_assimilate(filter,m,sensor,e,100);
+assert(r2.accepted&&numel(filter.used)==2);
+close(filter.state.p,batch.p,1e-8); close(filter.P,B,1e-8);
+% A duplicate range must not emit an update for the reference either.
+[same,r2]=nav_assimilate(filter,m,sensor,e,100);
+assert(~r2.accepted&&~isfield(r2,'peer_update')&&isequal(same,filter));
+
 % Impossible peer dependence must be rejected even perpendicular to the measured range.
 [s,e]=fixture; m=packet(s,'cooperative_range'); m.lever=zeros(3,1);
 m.station=s.p+[10;0;0]; m.z=10; m.peer_covariance=eye(3);
@@ -977,6 +1037,20 @@ close(replayed.state.p,timely.state.p,1e-12); close(replayed.jointP,timely.joint
 assert(norm(replayed.state.p-without.state.p)>0&&numel(replayed.used)==4);
 [again,ri]=nav_replay(f,{u,second},{boundary,late},{sensor,sensor},e,100);
 assert(ri.accepted&&isequal(again,replayed)); % Replaying does not add information twice.
+% New late data are admitted by their own age; historical data retain admission.
+policy=struct('now',late.t_received,'max_age',late.t_received-late.t_measure);
+[again,ri]=nav_replay(f,{u,second},{boundary,late},{sensor,sensor},e,100,{[],policy});
+assert(ri.accepted&&ri.observations{2}.accepted&&isequal(again,replayed));
+policy.max_age=policy.max_age-.1;
+[again,ri]=nav_replay(f,{u,second},{boundary,late},{sensor,sensor},e,100,{[],policy});
+assert(ri.accepted&&ri.observations{1}.accepted&&~ri.observations{2}.accepted);
+assert(strcmp(ri.observations{2}.reason,'libekf:Stale')&&isequal(again,without));
+policy.max_age=10; policy.now=late.t_received-.1;
+[again,ri]=nav_replay(f,{u,second},{boundary,late},{sensor,sensor},e,100,{[],policy});
+assert(ri.accepted&&strcmp(ri.observations{2}.reason,'libekf:Time')&&isequal(again,without));
+policy.now=NaN;
+[again,ri]=nav_replay(f,{u,second},{boundary,late},{sensor,sensor},e,100,{[],policy});
+assert(ri.accepted&&strcmp(ri.observations{2}.reason,'libekf:Time')&&isequal(again,without));
 old=late; old.t_measure=a.t-.5; old.lineage={'before_snapshot'};
 [again,ri]=nav_replay(f,{u,second},{boundary,late,old},{sensor,sensor,sensor},e,100);
 assert(ri.accepted&&~ri.observations{3}.accepted&&isequal(again,replayed));
@@ -993,6 +1067,14 @@ cam2=cam; cam2.t_start=second.t_start; cam2.t_end=second.t_end;
 cam2.t_received=second.t_end; cam2.lineage={'frame_c','frame_d'};
 save=struct('model','save_reference','t_measure',u.t_end);
 [replayed,ri]=nav_replay(f,{u,second},{late,cam,save,cam2},{sensor,[],[],[]},e,100);
+camera_policy=struct('now',second.t_end,'max_age',second.t_end-cam.t_end);
+[camera_admitted,camera_check]=nav_replay(f,{u,second},{late,cam,save,cam2}, ...
+    {sensor,[],[],[]},e,100,{[],camera_policy,[],[]});
+assert(camera_check.accepted&&camera_check.observations{2}.accepted&&isequal(camera_admitted,replayed));
+camera_policy.max_age=camera_policy.max_age-.01;
+[~,camera_check]=nav_replay(f,{u,second},{late,cam,save,cam2}, ...
+    {sensor,[],[],[]},e,100,{[],camera_policy,[],[]});
+assert(camera_check.accepted&&strcmp(camera_check.observations{2}.reason,'libekf:Stale'));
 assert(ri.accepted&&all(cellfun(@(z)z.accepted,ri.observations)));
 [timely,ti]=nav_assimilate_interval(f,u,{m,cam},{sensor,[]},e,100); assert(ti.accepted);
 timely=nav_save_reference(timely);
@@ -1381,6 +1463,17 @@ for k=1:numel(models)
     close(nav_rotation(replayed.state.q),nav_rotation(reference.state.q),1e-10);
     close(replayed.P,reference.P,1e-10);
     assert(replayed.state.t==u.t_end&&numel(replayed.used)==2);
+    % Each physical model obeys reception and age constraints before entering replay.
+    admission=struct('now',m.t_received,'max_age',m.t_received-m.t_measure);
+    [admitted,info]=nav_replay(f,{u},{m},{sensor},e,1e8,{admission});
+    assert(info.accepted&&info.observations{1}.accepted&&isequal(admitted,replayed));
+    admission.max_age=admission.max_age-.01;
+    [rejected,info]=nav_replay(f,{u},{m},{sensor},e,1e8,{admission});
+    assert(info.accepted&&strcmp(info.observations{1}.reason,'libekf:Stale')&&isequal(rejected,plain));
+    admission.max_age=10; admission.now=m.t_received-.01;
+    [rejected,info]=nav_replay(f,{u},{m},{sensor},e,1e8,{admission});
+    assert(info.accepted&&strcmp(info.observations{1}.reason,'libekf:Time')&&isequal(rejected,plain));
+
     % Missing contract data reject only the packet; adapters must not throw raw field errors.
     required={'source','model','z','R','units','frame','frame_id','t_measure','t_received', ...
         'quality','lineage','correlation_group','noise_model'};
