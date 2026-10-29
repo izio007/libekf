@@ -1497,6 +1497,25 @@ m.lineage={'first','second'};
 [unchanged,info]=nav_assimilate(accepted,m,[],e,100);
 assert(~info.accepted&&isequal(unchanged,accepted));
 
+% После закрытия истории первый кадр на границе нельзя переиспользовать в новой паре.
+closed=nav_checkpoint(saved); dated_imu=u; dated_imu.lineage_times=u.t_end;
+[continued,info]=nav_assimilate(closed,dated_imu,[],e,100); assert(info.accepted);
+dated_pair=m; dated_pair.lineage={'boundary_frame','after_boundary_frame'};
+dated_pair.lineage_times=[m.t_start m.t_end];
+[unchanged,info]=nav_assimilate(continued,dated_pair,[],e,100);
+assert(~info.accepted&&strcmp(info.reason,'libekf:RetiredHistory')&&isequal(unchanged,continued));
+% Пара, оба кадра которой после границы, проходит обычную совместную поправку.
+fresh=nav_save_reference(continued);
+dated_imu.t_start=fresh.state.t; dated_imu.t_end=fresh.state.t+.1;
+dated_imu.t_received=dated_imu.t_end; dated_imu.lineage={'after_boundary_imu'};
+dated_imu.lineage_times=dated_imu.t_end;
+[fresh,info]=nav_assimilate(fresh,dated_imu,[],e,100); assert(info.accepted);
+dated_pair.t_start=fresh.reference.t; dated_pair.t_end=fresh.state.t;
+dated_pair.t_received=fresh.state.t; dated_pair.lineage={'fresh_first','fresh_second'};
+dated_pair.lineage_times=[dated_pair.t_start dated_pair.t_end];
+dated_pair.z=fresh.state.p-fresh.reference.p;
+[updated,info]=nav_assimilate(fresh,dated_pair,[],e,100);
+assert(info.accepted&&updated.retired_through==closed.retired_through);
 
 end
 
@@ -1796,6 +1815,7 @@ assert(median(vecnorm(delta-[6 4],2,2))<1);
 assert(isequal(matches.lineage,{frame.id,next.id})&&matches.t_start==frame.t&& ...
     matches.t_end==next.t&&matches.t_received==next.t_received&&strcmp(matches.units,'pixel'));
 assert(isequal(matches,nav_visual_matches(frame,next,calibration,options)));
+close(matches.lineage_times,[frame.t next.t],1e-12);
 % Начало экспозиции приводится к её середине; строки сохраняют собственное время.
 capture_first=frame; capture_second=next;
 capture_first.capture=struct('duration',.02,'readout_time',0,'stamp_reference','first_row_start', ...
@@ -1809,6 +1829,8 @@ end_first.t=end_first.t+.02; end_second.t=end_second.t+.02;
 end_first.capture.stamp_reference='last_row_end'; end_second.capture.stamp_reference='last_row_end';
 same_capture=nav_visual_matches(end_first,end_second,calibration,capture_options);
 close(same_capture.point_times,global_capture.point_times,1e-12);
+close(same_capture.lineage_times,global_capture.lineage_times,1e-12);
+close(global_capture.lineage_times,[frame.t next.t],1e-12);
 capture_first.capture.readout_time=.04; capture_second.capture.readout_time=.04;
 rolling_matches=nav_visual_matches(capture_first,capture_second,calibration,capture_options);
 close(rolling_matches.point_times(:,1),frame.t+.01+(rolling_matches.first(:,2)-1)/239*.04,1e-10);
@@ -1816,6 +1838,7 @@ reverse_first=capture_first; reverse_second=capture_second;
 reverse_first.capture.row_direction=-1; reverse_second.capture.row_direction=-1;
 reverse_capture=nav_visual_matches(reverse_first,reverse_second,calibration,capture_options);
 close(reverse_capture.point_times(:,1),frame.t+.01+(240-reverse_capture.first(:,2))/239*.04,1e-10);
+close(reverse_capture.lineage_times,rolling_matches.lineage_times,1e-12);
 early=capture_first; early.t_received=early.t+.01;
 fails(@()nav_visual_matches(early,capture_second,calibration,capture_options),'libekf:Time');
 
@@ -1884,6 +1907,12 @@ unsupported=nav_visual_motion(rolling_matches,calibration.intrinsics,limits);
 assert(strcmp(unsupported.quality,'UNSUPPORTED_TIME_MODEL')&&~unsupported.geometry_ready&&isempty(unsupported.rotation));
 
 assert(isequal(before,after)&&motion.geometry_ready&&strcmp(motion.quality,'UNASSESSED'));
+dated=pair; dated.lineage_times=[pair.t_start pair.t_end];
+dated_motion=nav_visual_motion(dated,calibration.intrinsics,limits);
+assert(isequal(dated_motion.lineage_times,dated.lineage_times));
+bad=dated; bad.lineage_times(1)=pair.t_start+1;
+fails(@()nav_visual_motion(bad,calibration.intrinsics,limits),'libekf:LineageTime');
+
 close(motion.rotation,Rtrue,1e-5); close(motion.direction,shift/norm(shift),1e-5);
 assert(~motion.scale_known&&~isfield(motion,'R'));
 % Несколько допустимых наборов должны сохранять одну геометрию либо явную неоднозначность.
