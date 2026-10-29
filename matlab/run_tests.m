@@ -1605,6 +1605,27 @@ assert(median(vecnorm(delta-[6 4],2,2))<1);
 assert(isequal(matches.lineage,{frame.id,next.id})&&matches.t_start==frame.t&& ...
     matches.t_end==next.t&&matches.t_received==next.t_received&&strcmp(matches.units,'pixel'));
 assert(isequal(matches,nav_visual_matches(frame,next,calibration,options)));
+% Общая ошибка главной точки камеры сохраняется между точками и кадрами.
+noise_options=options; noise_options.max_points=100;
+noise_options.localization_covariance=.04*eye(2); noise_options.localization_independent=true;
+noise_calibration=calibration; noise_calibration.parameter_covariance=zeros(10);
+noise_calibration.parameter_noise_independent=true;
+independent_pixels=nav_visual_matches(frame,next,noise_calibration,noise_options);
+dimension=4*size(independent_pixels.first,1); assert(dimension>=48);
+close(full(independent_pixels.pixel_covariance),.04*eye(dimension),1e-7);
+noise_calibration.parameter_covariance(3,3)=1;
+shared_pixels=nav_visual_matches(frame,next,noise_calibration,noise_options);
+common=zeros(dimension,1); common(1:2:end)=1;
+close(full(shared_pixels.pixel_covariance-independent_pixels.pixel_covariance),common*common.',1e-6);
+close(shared_pixels.calibration_jacobian(:,3),-common,1e-7);
+xrows=1:2:dimension;
+assert(abs(mean(shared_pixels.pixel_covariance(xrows,xrows),'all')-1-.04/numel(xrows))<1e-6);
+bad_calibration=noise_calibration; bad_calibration.parameter_noise_independent=false;
+fails(@()nav_visual_matches(frame,next,bad_calibration,noise_options),'libekf:Correlation');
+bad_calibration=noise_calibration; bad_calibration.parameter_covariance(1,3)=1;
+bad_calibration.parameter_covariance(3,1)=1;
+fails(@()nav_visual_matches(frame,next,bad_calibration,noise_options),'libekf:Covariance');
+
 blank=frame; blank.image(:)=0; blank_next=next; blank_next.image(:)=0;
 missing=nav_visual_matches(blank,blank_next,calibration,options);
 assert(strcmp(missing.quality,'INSUFFICIENT')&&isempty(missing.first));

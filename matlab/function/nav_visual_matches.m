@@ -63,6 +63,61 @@ assert(all(isfinite(result.first(:)))&&all(isfinite(result.second(:))), ...
 stream=RandStream('mt19937ar','Seed',options.seed);
 order=randperm(stream,n); result.training=false(n,1); result.training(order(1:nfit))=true;
 result.quality='UNASSESSED';
+if isfield(options,'localization_covariance')||isfield(calibration,'parameter_covariance')
+    assert(all(isfield(options,{'localization_covariance','localization_independent'}))&& ...
+        all(isfield(calibration,{'parameter_covariance','parameter_noise_independent'}))&& ...
+        isequal(options.localization_independent,true)&&isequal(calibration.parameter_noise_independent,true), ...
+        'libekf:Correlation','Explicit independent localization and calibration noise models required.');
+    raw=reshape([double(points{1}(pairs(:,1)).Location) double(points{2}(pairs(:,2)).Location)].',2,[]).';
+    [result.pixel_covariance,result.calibration_jacobian]=pixel_uncertainty(raw,camera, ...
+        options.localization_covariance,calibration.parameter_covariance);
+    result.covariance_model='LOCAL_FIXED_MATCHES';
+end
 % Отложенные точки не участвовали ни в оценке движения, ни в геометрическом отборе.
 % Погрешность движения, различимость и масштаб по числу совпадений не выводятся.
+end
+
+function [C,J]=pixel_uncertainty(raw,camera,Cpoint,Ccal)
+% Параметры: fx,fy,cx,cy,skew,k1,k2,k3,p1,p2; исправленные пиксели при фиксированном номинальном K.
+assert(isnumeric(Cpoint)&&isreal(Cpoint)&&isequal(size(Cpoint),[2 2])&& ...
+    all(isfinite(Cpoint(:)))&&norm(Cpoint-Cpoint.','fro')<=1e-12*max(norm(Cpoint,'fro'),realmin), ...
+    'libekf:Covariance','Expected localization covariance in pixel squared.');
+[~,flag]=chol(Cpoint); assert(flag==0,'libekf:Covariance','Localization covariance must be positive definite.');
+assert(isnumeric(Ccal)&&isreal(Ccal)&&isequal(size(Ccal),[10 10])&&all(isfinite(Ccal(:)))&& ...
+    norm(Ccal-Ccal.','fro')<=1e-12*max(norm(Ccal,'fro'),realmin)&&all(diag(Ccal)>=0), ...
+    'libekf:Covariance','Expected joint calibration covariance.');
+scale=sqrt(diag(Ccal)); zero=scale==0;
+assert(~any(any(Ccal(zero,:)~=0)),'libekf:Covariance','Zero calibration variance has nonzero dependence.');
+normalized=(Ccal(~zero,~zero)./scale(~zero))./scale(~zero).';
+assert(isempty(normalized)||min(eig((normalized+normalized.')/2))>=-1e-12, ...
+    'libekf:Covariance','Calibration covariance is indefinite.');
+radial=zeros(1,3); radial(1:numel(camera.RadialDistortion))=camera.RadialDistortion;
+parameters=[camera.FocalLength camera.PrincipalPoint camera.Skew radial camera.TangentialDistortion];
+K=[parameters(1) parameters(5) parameters(3);0 parameters(2) parameters(4);0 0 1];
+n=size(raw,1); J=zeros(2*n,10); pixel_J=sparse(2*n,2*n);
+for j=1:10
+    step=eps^(1/3)*max(1,abs(parameters(j))); plus=parameters; minus=parameters;
+    plus(j)=plus(j)+step; minus(j)=minus(j)-step;
+    derivative=(effective_pixels(raw,plus,K,camera.ImageSize)-effective_pixels(raw,minus,K,camera.ImageSize))/(2*step);
+    J(:,j)=reshape(derivative.',[],1);
+end
+for j=1:2
+    step=eps^(1/3)*max(1,max(abs(raw(:,j)))); plus=raw; minus=raw;
+    plus(:,j)=plus(:,j)+step; minus(:,j)=minus(:,j)-step;
+    derivative=(effective_pixels(plus,parameters,K,camera.ImageSize)-effective_pixels(minus,parameters,K,camera.ImageSize))/(2*step);
+    for k=1:n, pixel_J(2*k-1:2*k,2*k-2+j)=derivative(k,:).'; end
+end
+C=pixel_J*kron(speye(n),Cpoint)*pixel_J.';
+if any(Ccal(:)), C=C+J*Ccal*J.'; end
+C=(C+C.')/2;
+assert(all(isfinite(C(:)))&&all(isfinite(J(:))),'libekf:Covariance','Nonfinite propagated image covariance.');
+end
+
+function out=effective_pixels(raw,p,Knom,image_size)
+camera=cameraIntrinsics(p(1:2),p(3:4),image_size,'Skew',p(5), ...
+    'RadialDistortion',p(6:8),'TangentialDistortion',p(9:10));
+corrected=double(undistortPoints(raw,camera));
+K=[p(1) p(5) p(3);0 p(2) p(4);0 0 1];
+rays=K\[corrected.';ones(1,size(raw,1))]; pixels=Knom*rays;
+out=(pixels(1:2,:)./pixels(3,:)).';
 end
