@@ -2229,6 +2229,29 @@ assert(~ismember('satellite_10',f.used));
 end
 
 function requirement_observable_quantities
+% Последовательность положений определяет скорость, которую один момент не определяет.
+history=struct('H',{{[1 0],[1 0]}},'transitions',{{[1 1;0 1]}},'times',[0 1], ...
+    'process_covariance',zeros(2),'measurement_covariance',eye(2), ...
+    'process_measurement_covariance',zeros(2),'frame_id','local');
+temporal=nav_observability_sequence(history,[1;1],[0 1],1e-10);
+assert(temporal.identified&&temporal.rank==2); close(temporal.variance,2,1e-12);
+instant=nav_observability([1 0],1,[1;1],[0 1],1e-10); assert(~instant.identified);
+% Текущее положение содержит процессную ошибку, общую с поздним измерением.
+history.H={1,1}; history.transitions={1}; history.process_covariance=4;
+history.measurement_covariance=diag([1 9]); history.process_measurement_covariance=zeros(1,2);
+temporal=nav_observability_sequence(history,1,1,1e-10);
+close(temporal.variance,45/14,1e-12);
+% Связь ошибки движения с первым измерением меняет ошибку прогноза: 1+4-2*.5=4.
+history.process_measurement_covariance=[.5 0];
+temporal=nav_observability_sequence(history,1,1,1e-10); close(temporal.variance,36/13,1e-12);
+centimetres=history; centimetres.H={.01,.01};
+centimetres.process_covariance=4e4; centimetres.process_measurement_covariance=[50 0];
+same=nav_observability_sequence(centimetres,100,.01,1e-10);
+close(same.variance,temporal.variance,1e-12);
+bad=history; bad.process_measurement_covariance=[5 0];
+fails(@()nav_observability_sequence(bad,1,1,1e-10),'libekf:Covariance');
+bad=history; bad.times=[1 0];
+fails(@()nav_observability_sequence(bad,1,1,1e-10),'libekf:Observability');
 % Two barometric readings do not separate height from their common bias.
 [s,e]=fixture; m=packet(s,'baro_height'); m.lever=zeros(3,1);
 o=nav_measurement(s,m,e); H=[o.H;o.H]; R=[4 1;1 4];
@@ -2277,6 +2300,22 @@ control.geometry.max_variance(3)=101;
 out=nav_geodetic_output(s,eye(21),e,control);
 assert(strcmp(out.quality.altitude,'CONSISTENT')&&out.accuracy_sufficient(3));
 assert(strcmp(out.quality.latitude,'UNOBSERVABLE'));
+% История геометрии подключается к географическому выходу на своём последнем моменте.
+temporal_control=control;
+temporal_control.geometry=rmfield(control.geometry,{'H','R'});
+temporal_control.geometry.history=struct('H',{{control.geometry.H(1,:),control.geometry.H(2,:)}}, ...
+    'transitions',{{eye(21)}},'times',[s.t-1 s.t],'frame_id',s.frame_id, ...
+    'process_covariance',zeros(21),'measurement_covariance',control.geometry.R, ...
+    'process_measurement_covariance',zeros(21,2));
+temporal_output=nav_geodetic_output(s,eye(21),e,temporal_control);
+assert(isequal(temporal_output.observable,out.observable));
+close(temporal_output.measurement_variance(3),out.measurement_variance(3),1e-10);
+assert(strcmp(temporal_output.quality.altitude,'CONSISTENT'));
+bad_control=temporal_control; bad_control.geometry.history.times(end)=s.t-1;
+fails(@()nav_geodetic_output(s,eye(21),e,bad_control),'libekf:WatchOutput');
+bad_control=temporal_control; bad_control.geometry.history.frame_id='another_frame';
+fails(@()nav_geodetic_output(s,eye(21),e,bad_control),'libekf:WatchOutput');
+
 [~,alarm]=nav_watch([],struct('t',s.t,'context','height','value',6),s.t,cfg);
 control.checks.altitude={alarm}; control.geometry.H(2,:)=o.H;
 out=nav_geodetic_output(s,eye(21),e,control);
