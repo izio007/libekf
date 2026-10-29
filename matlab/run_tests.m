@@ -2411,6 +2411,43 @@ a=struct('value',[2;0;0],'covariance',eye(3),'quantity','position','units',{{'m'
     'frame_id','local','t',10,'quality','VALID','source','one');
 b=a; b.value=zeros(3,1); b.source='two';
 cfg=struct('max_age',1,'limit',3,'context','position_one_two_local');
+% Неизвестная связь не превращается в нулевую ковариацию или подтверждение согласия.
+[missing,unavailable]=nav_compare_sources(a,b,[],10,cfg);
+assert(isempty(missing)&&strcmp(unavailable.status,'NOT_READY'));
+bounded_cfg=cfg; bounded_cfg.unknown_correlation_bound=true;
+[bounded,bound]=nav_compare_sources(a,b,[],10,bounded_cfg);
+assert(bounded.alarm_only&&strcmp(bound.nis_kind,'LOWER_BOUND')&&strcmp(bound.status,'NOT_READY'));
+close(bound.nis,1,1e-12);
+for rho=[-.99 -.5 0 .5 .99]
+    [~,exact]=nav_compare_sources(a,b,rho*eye(3),10,cfg);
+    assert(bound.nis<=exact.nis+1e-12);
+end
+units=diag([1000 .01 10]); scaled_a=a; scaled_b=b;
+scaled_a.value=units*a.value; scaled_b.value=units*b.value;
+scaled_a.covariance=units*a.covariance*units.'; scaled_b.covariance=units*b.covariance*units.';
+scaled_a.units={'mm';'hm';'dm'}; scaled_b.units=scaled_a.units;
+[~,scaled_bound]=nav_compare_sources(scaled_a,scaled_b,[],10,bounded_cfg);
+close(scaled_bound.nis,bound.nis,1e-12);
+alarm_only_watch=struct('windows',[1 2 3],'max_gap',1,'max_age',1,'capacity',10, ...
+    'instant_limit',10,'mean_limit',[.1 .1 .1],'rms_limit',[10 10 10]);
+bounded_history=[];
+for t=7:10
+    entry=bounded; entry.t=t;
+    [bounded_history,not_confirmed]=nav_watch(bounded_history,entry,t,alarm_only_watch);
+end
+assert(all(not_confirmed.ready)&&all(not_confirmed.mean>.1)&& ...
+    strcmp(not_confirmed.status,'NOT_READY')&&not_confirmed.alarm_only);
+large=a; other=b; large.value=[30;0;0]; large.t=11; other.t=11;
+[large_sample,disagreement]=nav_compare_sources(large,other,[],11,bounded_cfg);
+assert(strcmp(disagreement.status,'DISAGREEMENT'));
+[~,detected]=nav_watch(bounded_history,large_sample,11,alarm_only_watch);
+assert(strcmp(detected.status,'ALARM'));
+known=a; known.t=11;
+[exact_sample,~]=nav_compare_sources(known,other,zeros(3),11,cfg);
+assert(~strcmp(exact_sample.context,bounded.context));
+[changed_history,not_confirmed]=nav_watch(bounded_history,exact_sample,11,alarm_only_watch);
+assert(numel(changed_history.t)==1&&~not_confirmed.alarm_only&&strcmp(not_confirmed.status,'NOT_READY'));
+
 [sample,result]=nav_compare_sources(a,b,.5*eye(3),10,cfg);
 close(sample.value,[2;0;0],1e-12); close(result.nis,4,1e-12);
 assert(strcmp(result.status,'DISAGREEMENT'));

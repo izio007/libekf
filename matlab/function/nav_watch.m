@@ -1,5 +1,5 @@
 function [history,result]=nav_watch(history,sample,now,cfg)
-% Три интервала контроля одного сопоставимого ряда независимых проверок.
+% Три интервала контроля одного сопоставимого ряда диагностических проверок.
 % sample.value — расхождение, делённое на его погрешность; [] означает отсутствие нового отсчёта.
 % context меняется при смене источников, осей или модели нормирования.
 w=cfg.windows(:).';
@@ -13,17 +13,22 @@ limits=[cfg.instant_limit cfg.mean_limit(:).' cfg.rms_limit(:).'];
 assert(numel(limits)==7 && all(isfinite(limits)) && all(limits>0) && isscalar(now)&&isfinite(now), ...
     'libekf:WatchConfig','Invalid thresholds or current time.');
 if isempty(history), history=struct('t',[],'value',[],'context','','now',-Inf); end
+if ~isfield(history,'alarm_only'), history.alarm_only=false; end
 assert(now>=history.now,'libekf:Epoch','Watch time cannot go backwards.');
 history.now=now;
 if ~isempty(sample)
     assert(isscalar(sample.t)&&isfinite(sample.t)&&sample.t<=now && ...
         ischar(sample.context)&&~isempty(sample.context) && ...
         isvector(sample.value)&&~isempty(sample.value)&&all(isfinite(sample.value)), ...
-        'libekf:WatchSample','Invalid independent check.');
+        'libekf:WatchSample','Invalid diagnostic check.');
     assert(isempty(history.t)||sample.t>history.t(end),'libekf:Epoch','Repeated or late check.');
+    alarm_only=false; if isfield(sample,'alarm_only'), alarm_only=sample.alarm_only; end
+    assert(isequal(alarm_only,true)||isequal(alarm_only,false), ...
+        'libekf:WatchSample','Invalid alarm-only check mode.');
     if ~strcmp(history.context,sample.context)
-        history.t=[]; history.value=[]; history.context=sample.context;
+        history.t=[]; history.value=[]; history.context=sample.context; history.alarm_only=alarm_only;
     end
+    assert(history.alarm_only==alarm_only,'libekf:WatchSample','Changed check purpose requires a new context.');
     assert(isempty(history.value)||size(history.value,1)==numel(sample.value), ...
         'libekf:WatchSample','Changed check dimensions require a new context.');
     history.t(end+1)=sample.t; history.value(:,end+1)=sample.value(:);
@@ -35,7 +40,8 @@ if numel(history.t)>cfg.capacity
     history.t=history.t(end-cfg.capacity+1:end); history.value=history.value(:,end-cfg.capacity+1:end);
 end
 result=struct('status','NOT_READY','ready',false(1,3),'alarm',false(1,3), ...
-    'mean',NaN(1,3),'rms',NaN(1,3),'instant_alarm',false,'t',now,'age',Inf);
+    'mean',NaN(1,3),'rms',NaN(1,3),'instant_alarm',false,'t',now,'age',Inf, ...
+    'alarm_only',history.alarm_only);
 if isempty(history.t), return; end
 result.age=now-history.t(end); fresh=result.age<=cfg.max_age;
 result.instant_alarm=fresh && norm(history.value(:,end))>cfg.instant_limit;
@@ -50,11 +56,11 @@ for k=1:3
         result.ready(k)=fresh && all(gaps<=cfg.max_gap);
     end
     result.alarm(k)=result.ready(k) && ...
-        (result.mean(k)>cfg.mean_limit(k)||result.rms(k)>cfg.rms_limit(k));
+        ((~history.alarm_only&&result.mean(k)>cfg.mean_limit(k))||result.rms(k)>cfg.rms_limit(k));
 end
 if result.instant_alarm||any(result.alarm)
     result.status='ALARM';
-elseif all(result.ready)
+elseif all(result.ready)&&~history.alarm_only
     result.status='CONSISTENT';
 end
 end
