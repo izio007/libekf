@@ -1,4 +1,4 @@
-function result=nav_terrain_sequence(paths,series,map,limits)
+function result=nav_terrain_sequence(paths,series,map,limits,search)
 % Сравнение заданных возможных траекторий со всей последовательностью радиовысот.
 % paths — ячейки: строки вариантов, столбцы моментов; в ячейке состояние p,q,t,frame_id.
 % series.covariance — полная погрешность последовательности, включая карту и временные связи.
@@ -24,10 +24,39 @@ assert(isequal(size(R),[n n])&&all(isfinite(R(:)))&& ...
     'libekf:Covariance','Invalid sequence covariance.');
 d=sqrt(diag(R)); A=(R./d)./d.'; [L,flag]=chol((A+A.')/2,'lower');
 assert(flag==0,'libekf:Covariance','Sequence covariance must be positive definite.');
-count=size(paths,1); predicted=NaN(count,n); score=Inf(count,1);
+count=size(paths,1); offsets=[]; spacing=[];
+if nargin>=5
+    % Поиск постоянной ошибки положения счисленной траектории в местных осях.
+    assert(size(paths,1)==1&&isstruct(search)&&isscalar(search)&& ...
+        all(isfield(search,{'bounds','step','max_candidates'})), ...
+        'libekf:TerrainSearch','Expected one nominal trajectory and search bounds.');
+    bounds=search.bounds; step=search.step(:); capacity=search.max_candidates;
+    assert(isnumeric(bounds)&&isreal(bounds)&&isequal(size(bounds),[3 2])&& ...
+        all(isfinite(bounds(:)))&&all(bounds(:,2)>=bounds(:,1))&& ...
+        isnumeric(step)&&isreal(step)&&numel(step)==3&&all(isfinite(step))&&all(step>0)&& ...
+        isnumeric(capacity)&&isreal(capacity)&&isscalar(capacity)&&isfinite(capacity)&& ...
+        capacity>=1&&capacity==floor(capacity), ...
+        'libekf:TerrainSearch','Invalid metre bounds, spacing or candidate capacity.');
+    width=bounds(:,2)-bounds(:,1); cells=ceil(width./step);
+    count=prod(cells+1);
+    assert(isfinite(count)&&count<=capacity,'libekf:TerrainCapacity', ...
+        'Search exceeds candidate capacity; bounds and spacing are not silently reduced.');
+    axes=cell(1,3); spacing=zeros(3,1);
+    for axis=1:3
+        axes{axis}=linspace(bounds(axis,1),bounds(axis,2),cells(axis)+1);
+        assert(all(diff(axes{axis})>0),'libekf:TerrainSearch','Spacing is not representable at this origin.');
+        if cells(axis)>0, spacing(axis)=width(axis)/cells(axis); end
+    end
+    [x,y,zoffset]=ndgrid(axes{:}); offsets=[x(:) y(:) zoffset(:)];
+end
+predicted=NaN(count,n); score=Inf(count,1);
 for j=1:count
     for k=1:n
-        s=paths{j,k};
+        if nargin>=5
+            s=paths{1,k}; s.p=s.p(:)+offsets(j,:).';
+        else
+            s=paths{j,k};
+        end
         assert(s.t==t(k)&&strcmp(s.frame_id,map.frame_id), ...
             'libekf:Epoch','Candidate must match measurement time and map frame.');
         C=nav_rotation(s.q);
@@ -45,5 +74,9 @@ status='NO_MATCH';
 if numel(survivors)>1, status='AMBIGUOUS'; elseif numel(survivors)==1, status='ONE_CANDIDATE'; end
 result=struct('status',status,'candidates',survivors,'score',score,'predicted',predicted, ...
     't',t(end),'lineage',{series.lineage});
+if nargin>=5
+    result.offsets=offsets;
+    result.search=struct('bounds',bounds,'step',spacing,'continuous_verified',false);
+end
 % ONE_CANDIDATE относится только к предоставленному набору, не ко всей области поиска.
 end

@@ -146,6 +146,24 @@ close(r.score,[0;0;100],1e-10);
 short=series; short.t=series.t(1:2); short.z=series.z(1:2);
 short.lineage=series.lineage(1:2); short.covariance=series.covariance(1:2,1:2);
 r=nav_terrain_sequence(paths(:,1:2),short,map,limits); assert(numel(r.candidates)==3);
+% LEKF-024: поиск по области не приписывает плоскому рельефу горизонтальную привязку.
+search=struct('bounds',[-10 10;0 0;-1 1],'step',[10;1;1],'max_candidates',9);
+r=nav_terrain_sequence(paths(1,:),series,map,limits,search);
+assert(strcmp(r.status,'AMBIGUOUS')&&numel(r.candidates)==3&&~r.search.continuous_verified);
+surviving=r.offsets(r.candidates,:);
+close(sort(surviving(:,1)),[-10;0;10],1e-12);
+close(surviving(:,2:3),zeros(3,2),1e-12);
+close(r.predicted,10+r.offsets(:,3)*ones(1,3),1e-12);
+% Границы включены даже при шаге, не делящем ширину области.
+search.bounds=[-10 10;0 0;0 0]; search.step=[7;1;1];
+r=nav_terrain_sequence(paths(1,:),series,map,limits,search);
+assert(numel(r.candidates)==4&&min(r.offsets(:,1))==-10&&max(r.offsets(:,1))==10);
+assert(r.search.step(1)<=7);
+% Нехватка памяти не превращается в неполный поиск с положительным результатом.
+search.max_candidates=3;
+fails(@()nav_terrain_sequence(paths(1,:),series,map,limits,search),'libekf:TerrainCapacity');
+search.max_candidates=9; search.step(1)=0;
+fails(@()nav_terrain_sequence(paths(1,:),series,map,limits,search),'libekf:TerrainSearch');
 series.z=[20 20 20]; r=nav_terrain_sequence(paths,series,map,limits);
 assert(strcmp(r.status,'NO_MATCH')&&isempty(r.candidates));
 map.coverage_complete=false;
