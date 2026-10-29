@@ -3460,6 +3460,46 @@ prepared=nav_inertial_camera_motion({first,second},P,raw,environment,validity);
 close(prepared.motion.acceleration,zeros(3,2),1e-12);
 close(prepared.motion.body_rates,[first.bg second.bg],1e-12);
 assert(norm(prepared.state_noise_cov,'fro')>0&&strcmp(prepared.noise_model,'joint_required'));
+% Кадры между отсчётами ИНС получают общие ошибки соседних исходных измерений.
+sampled=raw; offsets=[-.1 .1 .3]; sampled.epochs=first.t+offsets;
+sampled.accel=repmat(raw.accel(:,1),1,3)+[1;2;3]*offsets;
+sampled.gyro=repmat(raw.gyro(:,1),1,3)+[.1;.2;.3]*offsets;
+sampled.t_received=sampled.epochs(end); sampled.lineage={'before','middle','after'};
+sampled.lineage_times=sampled.epochs; sampled.covariance=eye(18)*1e-4;
+sampled.state_noise_cov=zeros(42,18);
+sampled.interpolation_error=struct('mean',zeros(12,1),'covariance',eye(12)*1e-6, ...
+    'state_cross_cov',zeros(42,12),'sample_cross_cov',zeros(18,12));
+interpolation_limits=validity; interpolation_limits.max_sample_gap=.21;
+interpolated=nav_inertial_camera_motion({first,second},P,sampled,environment,interpolation_limits);
+exact=raw; exact.accel(:,2)=raw.accel(:,1)+[1;2;3]*.2;
+exact.gyro(:,2)=raw.gyro(:,1)+[.1;.2;.3]*.2;
+weights=kron([.5 .5 0;0 .5 .5],eye(6));
+exact.covariance=weights*sampled.covariance*weights.'+eye(12)*1e-6;
+expected=nav_inertial_camera_motion({first,second},P,exact,environment,validity);
+close(interpolated.motion.body_rates,expected.motion.body_rates,1e-12);
+close(interpolated.motion.acceleration,expected.motion.acceleration,1e-12);
+close(interpolated.covariance,expected.covariance,1e-12);
+close(interpolated.state_noise_cov,expected.state_noise_cov,1e-12);
+assert(isequal(interpolated.lineage,sampled.lineage)&& ...
+    isequal(interpolated.lineage_times(:),sampled.epochs(:))&&interpolated.t_received==sampled.t_received);
+assert(abs(exact.covariance(1,7)-2.5e-5)<1e-12);
+extra=sampled; extra.epochs=[first.t-.3 sampled.epochs];
+extra.lineage=[{'unused'} sampled.lineage]; extra.lineage_times=extra.epochs;
+extra.accel=[sampled.accel(:,1) sampled.accel]; extra.gyro=[sampled.gyro(:,1) sampled.gyro];
+extra.covariance=eye(24)*1e-4; extra.state_noise_cov=zeros(42,24);
+extra.interpolation_error.sample_cross_cov=zeros(24,12);
+selected=nav_inertial_camera_motion({first,second},P,extra,environment,interpolation_limits);
+assert(isequal(selected.lineage,interpolated.lineage)&&size(selected.input_transform,2)==18);
+close(selected.input_transform,interpolated.input_transform,1e-12);
+close(selected.covariance,interpolated.covariance,1e-12);
+
+bad=sampled; bad.t_received=second.t;
+fails(@()nav_inertial_camera_motion({first,second},P,bad,environment,interpolation_limits),'libekf:Time');
+short_gap=interpolation_limits; short_gap.max_sample_gap=.1;
+fails(@()nav_inertial_camera_motion({first,second},P,sampled,environment,short_gap),'libekf:Time');
+bad=sampled; bad.interpolation_error.sample_cross_cov(1,1)=1;
+fails(@()nav_inertial_camera_motion({first,second},P,bad,environment,interpolation_limits),'libekf:Covariance');
+
 % Численные производные номинально подготовленного входа имеют обратный знак:
 % ошибка входа определяется как подготовленное значение минус истинное.
 for j=1:42
