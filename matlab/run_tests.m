@@ -1586,6 +1586,36 @@ fails(@()nav_odometry_measurement(a,b,m),'libekf:Covariance');
 end
 
 function requirement_visual_ambiguity
+% Соответствия извлекаются из изображений; перенос в пикселях известен независимо.
+stream=RandStream('mt19937ar','Seed',17);
+texture=conv2(rand(stream,240,320),ones(3)/9,'same');
+texture=uint8(255*(texture-min(texture(:)))/(max(texture(:))-min(texture(:))));
+shifted=zeros(size(texture),'uint8'); shifted(5:end,7:end)=texture(1:end-4,1:end-6);
+frame=struct('image',texture,'source','visible_camera','id','image_a', ...
+    't',10,'t_received',10.1,'quality','VALID');
+next=frame; next.image=shifted; next.id='image_b'; next.t=10.2; next.t_received=10.3;
+calibration=struct('source',frame.source,'valid',true, ...
+    'intrinsics',cameraIntrinsics([250 250],[160 120],[240 320]));
+options=struct('max_points',1000,'match_ratio',.7,'fit_fraction',.5,'seed',9);
+before=rng; matches=nav_visual_matches(frame,next,calibration,options); after=rng;
+assert(isequal(before,after)&&strcmp(matches.quality,'UNASSESSED')&&~matches.scale_known);
+assert(size(matches.first,1)>=12&&nnz(matches.training)>=8&&nnz(~matches.training)>=4);
+delta=matches.second-matches.first;
+assert(median(vecnorm(delta-[6 4],2,2))<1);
+assert(isequal(matches.lineage,{frame.id,next.id})&&matches.t_start==frame.t&& ...
+    matches.t_end==next.t&&matches.t_received==next.t_received&&strcmp(matches.units,'pixel'));
+assert(isequal(matches,nav_visual_matches(frame,next,calibration,options)));
+blank=frame; blank.image(:)=0; blank_next=next; blank_next.image(:)=0;
+missing=nav_visual_matches(blank,blank_next,calibration,options);
+assert(strcmp(missing.quality,'INSUFFICIENT')&&isempty(missing.first));
+bad=next; bad.quality='FAILED';
+fails(@()nav_visual_matches(frame,bad,calibration,options),'libekf:Quality');
+bad=next; bad.t_received=bad.t-1;
+fails(@()nav_visual_matches(frame,bad,calibration,options),'libekf:Time');
+bad=next; bad.id=frame.id;
+fails(@()nav_visual_matches(frame,bad,calibration,options),'libekf:Vision');
+bad_calibration=calibration; bad_calibration.source='another_camera';
+fails(@()nav_visual_matches(frame,next,bad_calibration,options),'libekf:Quality');
 K=[800 0 320;0 800 240;0 0 1];
 [x,y]=meshgrid(linspace(-2,2,6),linspace(-1.5,1.5,5));
 world=[x(:).';y(:).';10+2*sin((1:numel(x))*.7)];
