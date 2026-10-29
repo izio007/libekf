@@ -934,6 +934,28 @@ control=struct('state_time',s.t,'frame_id',s.frame_id,'now',s.t, ...
     'checks',struct('altitude',{{good}}));
 out=nav_geodetic_output(s,eye(21),env,control);
 assert(strcmp(out.quality.altitude,'CONSISTENT')&&strcmp(out.quality.latitude,'NOT_READY'));
+% Полные окна проверки только для тревоги не подтверждают выходную величину.
+alarm_history=[];
+for t=s.t-6:s.t
+    [alarm_history,alarm_check]=nav_watch(alarm_history, ...
+        struct('t',t,'context','bounded_height','value',0,'alarm_only',true),t,c);
+end
+assert(all(alarm_check.ready)&&strcmp(alarm_check.status,'NOT_READY'));
+control.checks.altitude={alarm_check};
+out=nav_geodetic_output(s,eye(21),env,control);
+assert(strcmp(out.quality.altitude,'NOT_READY'));
+control.checks.altitude={good,alarm_check};
+out=nav_geodetic_output(s,eye(21),env,control);
+assert(strcmp(out.quality.altitude,'NOT_READY'));
+forged=alarm_check; forged.status='CONSISTENT'; control.checks.altitude={forged};
+fails(@()nav_geodetic_output(s,eye(21),env,control),'libekf:WatchOutput');
+forged=alarm_check; forged.alarm_only=[true false]; control.checks.altitude={forged};
+fails(@()nav_geodetic_output(s,eye(21),env,control),'libekf:WatchOutput');
+[~,alarm_check]=nav_watch([],struct('t',s.t,'context','bounded_alarm', ...
+    'value',6,'alarm_only',true),s.t,c);
+control.checks.altitude={good,alarm_check};
+out=nav_geodetic_output(s,eye(21),env,control);
+assert(strcmp(out.quality.altitude,'ALARM'));
 [~,bad]=nav_watch([],struct('t',s.t,'context','other_height_check','value',6),s.t,c);
 control.checks.altitude={good,bad};
 out=nav_geodetic_output(s,eye(21),env,control); assert(strcmp(out.quality.altitude,'ALARM'));

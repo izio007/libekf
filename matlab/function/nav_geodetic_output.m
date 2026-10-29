@@ -64,12 +64,15 @@ if nargin>=4
                     islogical(c.alarm)&&numel(c.alarm)==3&& ...
                     islogical(c.instant_alarm)&&isscalar(c.instant_alarm), ...
                     'libekf:WatchOutput','Checks must be evaluated at publication time.');
+                alarm_only=false; if isfield(c,'alarm_only'), alarm_only=c.alarm_only; end
+                assert(islogical(alarm_only)&&isscalar(alarm_only), ...
+                    'libekf:WatchOutput','Invalid diagnostic purpose.');
                 has_alarm=c.instant_alarm||any(c.alarm);
                 expected='NOT_READY';
                 if has_alarm, expected='ALARM';
-                elseif all(c.ready), expected='CONSISTENT'; end
+                elseif all(c.ready)&&~alarm_only, expected='CONSISTENT'; end
                 assert(strcmp(c.status,expected),'libekf:WatchOutput','Contradictory check status.');
-                alarm=alarm||has_alarm; complete=complete&&all(c.ready);
+                alarm=alarm||has_alarm; complete=complete&&all(c.ready)&&~alarm_only;
             end
             if alarm, status='ALARM'; elseif complete, status='CONSISTENT'; end
         end
