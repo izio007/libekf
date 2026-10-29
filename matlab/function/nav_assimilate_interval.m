@@ -109,8 +109,16 @@ if isfield(in,'future_noise')
         'libekf:Correlation','Splitting correlated process/stored noise requires a temporal model.');
     prior=in.P; epochs=out.state.t;
     if isfield(in,'reference'), prior=in.jointP; epochs=[in.reference.t;out.state.t]; end
-    out.future_noise=nav_predict_noise(in.future_noise,prior,transition,process_covariance, ...
-        epochs,zeros(size(transition,1),numel(in.future_noise.mean)));
+    if isfield(in.future_noise,'peer_cross_cov')
+        assert(isfield(in,'reference_bank')&&isfield(imu,'reference_motion'),'libekf:Correlation', ...
+            'Joint errors require the retained reference motion model.');
+        joint_motion=imu.reference_motion; joint_motion.t_start=in.state.t; joint_motion.t_end=t;
+        [out.future_noise,out.reference_bank]=nav_predict_noise(in.future_noise,prior,transition,process_covariance, ...
+            epochs,zeros(size(transition,1),numel(in.future_noise.mean)),in.reference_bank,joint_motion);
+    else
+        out.future_noise=nav_predict_noise(in.future_noise,prior,transition,process_covariance, ...
+            epochs,zeros(size(transition,1),numel(in.future_noise.mean)));
+    end
 end
 record=struct('transition',transition,'process_covariance',process_covariance, ...
     't_start',part.t_start,'t_end',part.t_end,'frame_id',in.state.frame_id, ...
@@ -118,7 +126,8 @@ record=struct('transition',transition,'process_covariance',process_covariance, .
 if isfield(in,'future_noise')
     record.future_noise_process_cross_cov=zeros(size(transition,1),numel(in.future_noise.mean));
 end
-if isfield(in,'reference_bank')
+if isfield(in,'reference_bank')&& ...
+        ~(isfield(in,'future_noise')&&isfield(in.future_noise,'peer_cross_cov'))
     motion=imu.reference_motion; motion.t_start=in.state.t; motion.t_end=t;
     transition=T; if isfield(in,'reference'), transition=blkdiag(eye(21),T); end
     out.reference_bank=nav_predict_reference(in.reference_bank,transition,motion);

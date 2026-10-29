@@ -160,8 +160,10 @@ try
         if stored_bank
             assert(isfield(packet,'reference_motion'),'libekf:Peer','Reference motion model required.');
             transition=T; if paired, transition=blkdiag(eye(21),T); end
-            bank=nav_predict_reference(bank,transition,packet.reference_motion);
-            assert(bank.t==candidate.t,'libekf:Epoch','Reference and navigation propagation end times differ.');
+            if ~(stored_noise&&isfield(future,'peer_cross_cov'))
+                bank=nav_predict_reference(bank,transition,packet.reference_motion);
+            end
+            assert((stored_noise&&isfield(future,'peer_cross_cov'))||bank.t==candidate.t,'libekf:Epoch','Reference and navigation propagation end times differ.');
         end
         if stored_noise
             assert(isfield(packet,'future_noise_independent')&& ...
@@ -177,7 +179,14 @@ try
             assert((packet.future_noise_independent&&all(W(:)==0))|| ...
                 (~packet.future_noise_independent&&isfield(packet,'future_noise_process_cross_cov')), ...
                 'libekf:Correlation','Missing or contradictory process/stored-noise covariance.');
-            future=nav_predict_noise(future,prior,transition,process,epochs,W);
+            if isfield(future,'peer_cross_cov')
+                assert(stored_bank&&isfield(packet,'reference_motion'),'libekf:Correlation', ...
+                    'Joint errors require the retained reference motion model.');
+                [future,bank]=nav_predict_noise(future,prior,transition,process,epochs,W, ...
+                    filter.reference_bank,packet.reference_motion);
+            else
+                future=nav_predict_noise(future,prior,transition,process,epochs,W);
+            end
         end
         ids=unique(packet.lineage(:));
     elseif odometry

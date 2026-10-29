@@ -1298,6 +1298,35 @@ imu=struct('model','inertial','source','imu','lineage',{{'future_noise_imu'}},'q
     'frame','BODY','accel_unit','m/s^2','gyro_unit','rad/s','t_start',s.t,'t_end',s.t+.1, ...
     't_received',s.t+.1,'accel',zeros(3,1),'gyro',zeros(3,1),'noise_density',.01*eye(6), ...
     'future_noise_independent',true);
+% Общие ошибки продолжаются вместе с движущейся опорой через реальный шаг ИНС.
+joint_imu=imu; joint_imu.lineage={'joint_errors_imu'};
+joint_imu.reference_motion=struct('F',diag([.1 -.2 .05]),'drift',[1;2;3], ...
+    'noise_density',.02*eye(3),'t_start',s.t,'t_end',imu.t_end,'frame_id',s.frame_id, ...
+    'noise_independent',true,'future_noise_independent',true);
+[joint_advanced,joint_info]=nav_assimilate(snapshot,joint_imu,[],motion,100);
+assert(joint_info.accepted);
+Aref=expm(joint_imu.reference_motion.F*(imu.t_end-s.t));
+close(joint_advanced.future_noise.peer_cross_cov,Aref*snapshot.future_noise.peer_cross_cov,1e-12);
+close(joint_advanced.future_noise.cross_cov, ...
+    joint_info.propagation.transition*snapshot.future_noise.cross_cov,1e-12);
+assert(joint_advanced.future_noise.peer_time==imu.t_end&&joint_advanced.reference_bank.t==imu.t_end);
+% Промежуточное сообщение здоровья делит интервал, не добавляя измерительной информации.
+event=struct('model','source_health','source','watch','lineage',{{'joint_health'}}, ...
+    'quality','VALID','target_source','unrelated_sensor','valid',false, ...
+    'frame_id',s.frame_id,'t_measure',s.t+.05,'t_received',imu.t_end);
+[split,trace]=nav_assimilate_interval(snapshot,joint_imu,{event},{[]},motion,100);
+assert(trace.accepted&&trace.observations{1}.accepted);
+close(split.future_noise.peer_cross_cov,joint_advanced.future_noise.peer_cross_cov,1e-12);
+close(split.reference_bank.covariance,joint_advanced.reference_bank.covariance,1e-12);
+assert(split.future_noise.peer_time==imu.t_end);
+[replayed,trace]=nav_replay(snapshot,{joint_imu},{event},{[]},motion,100);
+assert(trace.accepted); close(replayed.future_noise.peer_cross_cov,split.future_noise.peer_cross_cov,0);
+invalid=joint_imu; invalid.reference_motion=rmfield(invalid.reference_motion,'future_noise_independent');
+[unchanged,rejected]=nav_assimilate(snapshot,invalid,[],motion,100);
+assert(~rejected.accepted&&isequal(unchanged,snapshot));
+invalid_snapshot=snapshot; invalid_snapshot.future_noise.peer_cross_cov(2)=10;
+[unchanged,rejected]=nav_assimilate(invalid_snapshot,joint_imu,[],motion,100);
+assert(~rejected.accepted&&isequal(unchanged,invalid_snapshot));
 [advanced,ok]=nav_assimilate(conditioned,imu,[],motion,100); assert(ok.accepted);
 close(advanced.future_noise.cross_cov,ok.propagation.transition*future.cross_cov,1e-12);
 close(advanced.future_noise.covariance,future.covariance,0);
