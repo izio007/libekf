@@ -82,6 +82,35 @@ for k=1:numel(models)
         assert(isequal(observed.identified,expected_geometry.identified));
         known=observed.identified;
         if any(known), close(observed.variance(known),expected_geometry.variance(known),1e-8); end
+        % Любой источник обновляет связанную опору, даже без прямого измерения её положения.
+        retained=with_noise;
+        retained.reference_bank=struct('ids',{{'retained_peer'}},'valid',true,'position',[100;200;300], ...
+            'covariance',eye(3),'cross_cov',zeros(21,3),'t',s.t,'frame_id',s.frame_id);
+        E=zeros(3,count); E(1,:)=.1*sqrt(diag(with_noise.future_noise.covariance)).'/sqrt(count);
+        retained.future_noise.peer_cross_cov=E; retained.future_noise.peer_time=s.t;
+        retained.future_noise.peer_ids={'retained_peer'};
+        joint_packet=dependent; joint_packet.reference_noise_independent=true;
+        [joint_result,joint_info]=nav_assimilate(retained,joint_packet,sensor0,e,1e8);
+        assert(joint_info.accepted,'libekf:AllSources','Shared retained reference in %s rejected: %s',models{k},joint_info.reason);
+        prior=blkdiag(f.P,eye(3),with_noise.future_noise.covariance);
+        prior(22:24,25:end)=E; prior(25:end,22:24)=E.';
+        augmented_H=[model.H zeros(count,3) eye(count)];
+        innovation=augmented_H*prior*augmented_H.'+model.R;
+        scales=sqrt(diag(innovation)); normalized=(innovation./scales)./scales.';
+        gain=((prior*augmented_H.')./scales.')/normalized; gain=gain./scales.';
+        expected_joint=prior-gain*augmented_H*prior;
+        reset=blkdiag(joint_info.error_reset,eye(3+count)); expected_joint=reset*expected_joint*reset.';
+        actual_joint=[joint_result.P joint_result.reference_bank.cross_cov joint_result.future_noise.cross_cov; ...
+            joint_result.reference_bank.cross_cov.' joint_result.reference_bank.covariance joint_result.future_noise.peer_cross_cov; ...
+            joint_result.future_noise.cross_cov.' joint_result.future_noise.peer_cross_cov.' joint_result.future_noise.covariance];
+        close(actual_joint,expected_joint,1e-8);
+        close(joint_result.reference_bank.position,retained.reference_bank.position+gain(22:24,:)*model.residual,1e-8);
+        close(joint_result.future_noise.mean,gain(25:end,:)*model.residual,1e-8);
+        contradictory=joint_packet; contradictory.reference_noise_cross_cov=ones(3,count);
+        [unchanged,rejected]=nav_assimilate(retained,contradictory,sensor0,e,1e8);
+        assert(~rejected.accepted&&isequal(unchanged,retained));
+
+
 
     end
 
