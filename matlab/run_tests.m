@@ -1649,6 +1649,29 @@ assert(median(vecnorm(delta-[6 4],2,2))<1);
 assert(isequal(matches.lineage,{frame.id,next.id})&&matches.t_start==frame.t&& ...
     matches.t_end==next.t&&matches.t_received==next.t_received&&strcmp(matches.units,'pixel'));
 assert(isequal(matches,nav_visual_matches(frame,next,calibration,options)));
+% Начало экспозиции приводится к её середине; строки сохраняют собственное время.
+capture_first=frame; capture_second=next;
+capture_first.capture=struct('duration',.02,'readout_time',0,'stamp_reference','first_row_start', ...
+    'row_direction',1,'unit','s','valid',true); capture_second.capture=capture_first.capture;
+capture_options=options; capture_options.max_points=100;
+global_capture=nav_visual_matches(capture_first,capture_second,calibration,capture_options);
+close([global_capture.t_start global_capture.t_end],[frame.t next.t]+.01,1e-12);
+close(global_capture.point_times,repmat([global_capture.t_start global_capture.t_end],size(global_capture.first,1),1),1e-12);
+end_first=capture_first; end_second=capture_second;
+end_first.t=end_first.t+.02; end_second.t=end_second.t+.02;
+end_first.capture.stamp_reference='last_row_end'; end_second.capture.stamp_reference='last_row_end';
+same_capture=nav_visual_matches(end_first,end_second,calibration,capture_options);
+close(same_capture.point_times,global_capture.point_times,1e-12);
+capture_first.capture.readout_time=.04; capture_second.capture.readout_time=.04;
+rolling_matches=nav_visual_matches(capture_first,capture_second,calibration,capture_options);
+close(rolling_matches.point_times(:,1),frame.t+.01+(rolling_matches.first(:,2)-1)/239*.04,1e-10);
+reverse_first=capture_first; reverse_second=capture_second;
+reverse_first.capture.row_direction=-1; reverse_second.capture.row_direction=-1;
+reverse_capture=nav_visual_matches(reverse_first,reverse_second,calibration,capture_options);
+close(reverse_capture.point_times(:,1),frame.t+.01+(240-reverse_capture.first(:,2))/239*.04,1e-10);
+early=capture_first; early.t_received=early.t+.01;
+fails(@()nav_visual_matches(early,capture_second,calibration,capture_options),'libekf:Time');
+
 % Общая ошибка главной точки камеры сохраняется между точками и кадрами.
 noise_options=options; noise_options.max_points=100;
 noise_options.localization_covariance=.04*eye(2); noise_options.localization_independent=true;
@@ -1692,6 +1715,9 @@ limits=struct('trials',1000,'confidence',99.9,'fit_distance',.1,'check_distance'
     'min_check_support',.9,'min_front_fraction',.9,'seed',123, ...
     'ambiguity',struct('rotation_rms',.1,'plane_rms',.1,'point_limit',.1,'min_support',.9));
 before=rng; motion=nav_visual_motion(pair,calibration.intrinsics,limits); after=rng;
+unsupported=nav_visual_motion(rolling_matches,calibration.intrinsics,limits);
+assert(strcmp(unsupported.quality,'UNSUPPORTED_TIME_MODEL')&&~unsupported.geometry_ready&&isempty(unsupported.rotation));
+
 assert(isequal(before,after)&&motion.geometry_ready&&strcmp(motion.quality,'UNASSESSED'));
 close(motion.rotation,Rtrue,1e-5); close(motion.direction,shift/norm(shift),1e-5);
 assert(~motion.scale_known&&~isfield(motion,'R'));

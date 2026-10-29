@@ -43,6 +43,15 @@ result=struct('source',matches.source,'lineage',{matches.lineage}, ...
     'quality','INSUFFICIENT','scale_known',false,'geometry_ready',false, ...
     'rotation',[],'direction',[],'checking_errors',[],'checking_support',0,'front_fraction',0, ...
     'fitting_indices',[]);
+if isfield(matches,'capture')&&matches.capture.specified
+    assert(all(isfield(matches.capture,{'readout_time','exposure_duration'}))&& ...
+        isnumeric(matches.capture.readout_time)&&isreal(matches.capture.readout_time)&& ...
+        numel(matches.capture.readout_time)==2&&all(isfinite(matches.capture.readout_time))&& ...
+        all(matches.capture.readout_time>=0),'libekf:Time','Invalid frame readout metadata.');
+    if any(matches.capture.readout_time>0)
+        result.quality='UNSUPPORTED_TIME_MODEL'; return;
+    end
+end
 % Альтернативы используют то же исходное разделение, без отбора по основной модели.
 result.ambiguity=nav_visual_ambiguity(matches.first,matches.second,K,matches.training,limits.ambiguity);
 if strcmp(result.ambiguity.status,'AMBIGUOUS'), result.quality='AMBIGUOUS'; end
@@ -206,6 +215,7 @@ for k=1:numel(selection.subsets)
     subset=selection.subsets{k}(:); indices=[subset;checking];
     part=matches; part.first=matches.first(indices,:); part.second=matches.second(indices,:);
     part.training=[true(numel(subset),1);false(numel(checking),1)];
+    if isfield(matches,'point_times')&&~isempty(matches.point_times), part.point_times=matches.point_times(indices,:); end
     args={};
     if ~isempty(covariance_args)
         pixel_indices=reshape((4*(indices-1)+(1:4)).',[],1);

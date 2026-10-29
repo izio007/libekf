@@ -41,10 +41,21 @@ assert(isscalar(options.max_points)&&isfinite(options.max_points)&& ...
     isscalar(options.seed)&&isfinite(options.seed)&&options.seed>=0&& ...
     options.seed<=2^32-1&&options.seed==floor(options.seed), ...
     'libekf:Vision','Invalid matching or partition settings.');
+capture_known=isfield(first,'capture')||isfield(second,'capture');
+centres=[first.t second.t]; capture=struct('specified',false);
+if capture_known
+    assert(isfield(first,'capture')&&isfield(second,'capture'),'libekf:Time','Capture metadata required for both frames.');
+    [centres(1),span1]=capture_times(first); [centres(2),span2]=capture_times(second);
+    assert(centres(1)<centres(2),'libekf:Time','Image exposure centres are not ordered.');
+    capture=struct('specified',true,'exposure_duration',[first.capture.duration second.capture.duration], ...
+        'readout_time',[first.capture.readout_time second.capture.readout_time], ...
+        'row_direction',[first.capture.row_direction second.capture.row_direction], ...
+        'intervals',[span1;span2]);
+end
 result=struct('source',first.source,'lineage',{{first.id,second.id}}, ...
-    't_start',first.t,'t_end',second.t,'t_received',max(first.t_received,second.t_received), ...
+    't_start',centres(1),'t_end',centres(2),'t_received',max(first.t_received,second.t_received), ...
     'units','pixel','first',zeros(0,2),'second',zeros(0,2),'training',false(0,1), ...
-    'quality','INSUFFICIENT','scale_known',false);
+    'quality','INSUFFICIENT','scale_known',false,'capture',capture,'point_times',zeros(0,2));
 images={im2gray(first.image),im2gray(second.image)};
 features=cell(1,2); points=cell(1,2);
 for k=1:2
@@ -56,8 +67,15 @@ end
 pairs=matchFeatures(features{1},features{2},'Unique',true,'MaxRatio',options.match_ratio);
 n=size(pairs,1); nfit=floor(n*options.fit_fraction);
 if nfit<8||n-nfit<4, return; end
-result.first=double(undistortPoints(points{1}(pairs(:,1)).Location,camera));
-result.second=double(undistortPoints(points{2}(pairs(:,2)).Location,camera));
+selected_first=double(points{1}(pairs(:,1)).Location);
+selected_second=double(points{2}(pairs(:,2)).Location);
+if capture_known
+    rows=[selected_first(:,2) selected_second(:,2)];
+    height=size(first.image,1);
+    result.point_times=centres+(rows-(height+1)/2)/(height-1).*capture.readout_time.*capture.row_direction;
+end
+result.first=double(undistortPoints(selected_first,camera));
+result.second=double(undistortPoints(selected_second,camera));
 assert(all(isfinite(result.first(:)))&&all(isfinite(result.second(:))), ...
     'libekf:Vision','Nonfinite undistorted coordinates.');
 stream=RandStream('mt19937ar','Seed',options.seed);
@@ -68,7 +86,7 @@ if isfield(options,'localization_covariance')||isfield(calibration,'parameter_co
         all(isfield(calibration,{'parameter_covariance','parameter_noise_independent'}))&& ...
         isequal(options.localization_independent,true)&&isequal(calibration.parameter_noise_independent,true), ...
         'libekf:Correlation','Explicit independent localization and calibration noise models required.');
-    raw=reshape([double(points{1}(pairs(:,1)).Location) double(points{2}(pairs(:,2)).Location)].',2,[]).';
+    raw=reshape([selected_first selected_second].',2,[]).';
     [result.pixel_covariance,result.calibration_jacobian]=pixel_uncertainty(raw,camera, ...
         options.localization_covariance,calibration.parameter_covariance);
     result.covariance_model='LOCAL_FIXED_MATCHES';
@@ -120,4 +138,25 @@ corrected=double(undistortPoints(raw,camera));
 K=[p(1) p(5) p(3);0 p(2) p(4);0 0 1];
 rays=K\[corrected.';ones(1,size(raw,1))]; pixels=Knom*rays;
 out=(pixels(1:2,:)./pixels(3,:)).';
+end
+
+function [centre,interval]=capture_times(frame)
+c=frame.capture;
+assert(isstruct(c)&&isscalar(c)&&all(isfield(c, ...
+    {'duration','readout_time','stamp_reference','row_direction','unit','valid'}))&& ...
+    isequal(c.valid,true)&&strcmp(c.unit,'s')&& ...
+    isnumeric(c.duration)&&isscalar(c.duration)&&isreal(c.duration)&&isfinite(c.duration)&&c.duration>=0&& ...
+    isnumeric(c.readout_time)&&isscalar(c.readout_time)&&isreal(c.readout_time)&&isfinite(c.readout_time)&&c.readout_time>=0&& ...
+    isscalar(c.row_direction)&&any(c.row_direction==[-1 1]), ...
+    'libekf:Time','Valid exposure duration, readout time and row direction required.');
+half=(c.duration+c.readout_time)/2;
+switch c.stamp_reference
+    case 'first_row_start', centre=frame.t+half;
+    case 'frame_center', centre=frame.t;
+    case 'last_row_end', centre=frame.t-half;
+    otherwise, error('libekf:Time','Unknown capture timestamp reference.');
+end
+interval=centre+[-half half];
+assert(all(isfinite(interval))&&frame.t_received>=interval(2), ...
+    'libekf:Time','Frame received before acquisition completed.');
 end
