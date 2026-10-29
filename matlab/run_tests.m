@@ -3353,6 +3353,27 @@ assert(clean_output.sources_complete&&isempty(clean_output.invalidated_sources)&
     strcmp(clean_output.quality.altitude,'NOT_READY'));
 
 
+% Восстановление запрещает вклад отказавшего прибора на всём интервале пересчёта.
+old_restore=restore; old_restore.t_measure=f.state.t; old_restore.t_received=f.state.t;
+[repaired,trace]=nav_replay(clean_initial,{u},{old_restore,suspect},{[],sensor},e,1e8, ...
+    {[],[]},{'failed_position_sensor'});
+assert(trace.accepted&&~any(cellfun(@(x)x.accepted,trace.observations)));
+close(repaired.state.p,plain.state.p,1e-12); close(repaired.P,plain.P,1e-12);
+assert(ismember('failed_position_sensor',repaired.excluded_sources)&& ...
+    ~isfield(repaired,'invalidated_sources'));
+% Неполное происхождение, прежний вклад и неустранённое влияние не стираются пересчётом.
+for unsafe={f,contaminated,still_affected}
+    [unchanged,trace]=nav_replay(unsafe{1},{u},{suspect},{sensor},e,1e8,{[]}, ...
+        {'failed_position_sensor'});
+    assert(~trace.accepted&&strcmp(trace.reason,'libekf:RecoveryInitial')&&isequal(unchanged,unsafe{1}));
+end
+tainted=clean_initial; tainted.source_history=contaminated.source_history;
+[unchanged,trace]=nav_replay(tainted,{u},{},{},e,1e8,{}, {'failed_position_sensor'});
+assert(~trace.accepted&&strcmp(trace.reason,'libekf:RecoveryInitial')&&isequal(unchanged,tainted));
+% Отказ единственной ИНС не подменяется продолжением по её же данным.
+[unchanged,trace]=nav_replay(clean_initial,{u},{},{},e,1e8,{}, {u.source});
+assert(~trace.accepted&&isequal(unchanged,clean_initial));
+
 % Производное наблюдение может относиться к более раннему времени, чем его исходные данные.
 derived=packet(mid,'external_position'); derived.frame='SENSOR_LOCAL';
 derived.lineage={'later_original'}; derived.lineage_times=mid.t+.02; derived.t_received=u.t_end+.1;

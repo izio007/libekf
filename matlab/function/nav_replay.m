@@ -1,4 +1,4 @@
-function [out,result]=nav_replay(initial,intervals,packets,sensors,env,limit,admission)
+function [out,result]=nav_replay(initial,intervals,packets,sensors,env,limit,admission,recovery_exclusions)
 % Повторный расчёт сохранённой истории от неизменённого исходного снимка.
 % admission{k}: now/max_age для нового отсчёта; [] для ранее допущенной истории.
 % Без admission вызывающая сторона сама проверяет получение и возраст новых данных.
@@ -6,6 +6,26 @@ function [out,result]=nav_replay(initial,intervals,packets,sensors,env,limit,adm
 assert(iscell(intervals)&&~isempty(intervals)&&iscell(packets)&&iscell(sensors)&& ...
     numel(packets)==numel(sensors),'libekf:History','Expected inertial history and paired observation cells.');
 out=initial; result=struct('accepted',false,'reason','','observations',{{}},'steps',{{}});
+% Восстановительный пересчёт: запрет действует на всю историю, включая сообщения возврата.
+if nargin<8, recovery_exclusions={}; end
+assert(iscell(recovery_exclusions)&&all(cellfun(@(x)ischar(x)&&isrow(x)&&~isempty(x), ...
+    recovery_exclusions)),'libekf:SourceHealth','Invalid recovery exclusion list.');
+if ~isempty(recovery_exclusions)
+    if ~isfield(initial,'sources_complete')||~isequal(initial.sources_complete,true)|| ...
+            ~isfield(initial,'source_history')|| ...
+            (isfield(initial,'invalidated_sources')&&~isempty(initial.invalidated_sources))
+        result.reason='libekf:RecoveryInitial'; return;
+    end
+    history=initial.source_history;
+    if ~isstruct(history)||~isfield(history,'id')|| ...
+            any(ismember({history.id},recovery_exclusions))
+        result.reason='libekf:RecoveryInitial'; return;
+    end
+    previous={}; if isfield(initial,'excluded_sources'), previous=initial.excluded_sources; end
+    assert(iscell(previous)&&all(cellfun(@(x)ischar(x)&&isrow(x)&&~isempty(x),previous)), ...
+        'libekf:SourceHealth','Invalid snapshot exclusion list.');
+    initial.excluded_sources=unique([previous(:);recovery_exclusions(:)],'stable').';
+end
 n=numel(packets); epochs=Inf(1,n); checks=cell(size(packets));
 if nargin<7, admission=cell(size(packets)); end
 assert(iscell(admission)&&numel(admission)==n, ...
@@ -14,6 +34,11 @@ for k=1:n
     checks{k}=struct('accepted',false,'reason','libekf:Epoch','nis',NaN);
     p=packets{k};
     if ~isstruct(p)||~isscalar(p)||~isfield(p,'model')||strcmp(p.model,'inertial'), continue; end
+    if strcmp(p.model,'source_health')&&isfield(p,'target_source')&& ...
+            isfield(p,'valid')&&isequal(p.valid,true)&& ...
+            any(strcmp(recovery_exclusions,p.target_source))
+        checks{k}.reason='libekf:SourceHealth'; continue;
+    end
     field='t_measure'; if strcmp(p.model,'visual_odometry'), field='t_end'; end
     if ~isfield(p,field), continue; end
     t=p.(field);
