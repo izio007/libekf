@@ -2257,6 +2257,32 @@ assert(~ismember('satellite_10',f.used));
 end
 
 function requirement_observable_quantities
+% Сохранение копии не создаёт измерительной информации, даже в тот же момент.
+clone=struct('H',{{1,zeros(0,2)}},'transitions',{{[1;1]}},'times',[0 0], ...
+    'process_covariance',zeros(2),'measurement_covariance',9, ...
+    'process_measurement_covariance',zeros(2,1),'frame_id','local');
+result=nav_observability_sequence(clone,1,eye(2),1e-10);
+assert(all(result.identified)&&result.rank==1); close(result.variance,[9;9],1e-12);
+% Удаление наблюдаемой компоненты не делает ненаблюдаемую компоненту известной.
+drop=clone; drop.H={[1 0],zeros(0,1)}; drop.transitions={[0 1]};
+drop.process_covariance=0; drop.process_measurement_covariance=0;
+result=nav_observability_sequence(drop,[1;1],1,1e-10);
+assert(~result.identified&&isinf(result.variance));
+% Прогноз до выхода без нового наблюдения накапливает ошибку движения.
+coast=drop; coast.H={1,zeros(0,1)}; coast.transitions={1}; coast.times=[0 2];
+coast.measurement_covariance=1; coast.process_covariance=4;
+result=nav_observability_sequence(coast,1,1,1e-10);
+assert(result.identified&&result.t==2); close(result.variance,5,1e-12);
+coast.process_measurement_covariance=.5;
+result=nav_observability_sequence(coast,1,1,1e-10); close(result.variance,4,1e-12);
+% Пустой начальный узел допустим; измерение на выходе определяет текущую величину.
+coast.H={zeros(0,1),1}; coast.process_measurement_covariance=0;
+result=nav_observability_sequence(coast,1,1,1e-10); close(result.variance,1,1e-12);
+bad=clone; bad.transitions={eye(2)};
+fails(@()nav_observability_sequence(bad,1,eye(2),1e-10),'libekf:Observability');
+bad=clone; bad.H={zeros(0,1),zeros(0,2)};
+fails(@()nav_observability_sequence(bad,1,eye(2),1e-10),'libekf:Observability');
+
 % Последовательность положений определяет скорость, которую один момент не определяет.
 history=struct('H',{{[1 0],[1 0]}},'transitions',{{[1 1;0 1]}},'times',[0 1], ...
     'process_covariance',zeros(2),'measurement_covariance',eye(2), ...
@@ -2339,6 +2365,14 @@ temporal_output=nav_geodetic_output(s,eye(21),e,temporal_control);
 assert(isequal(temporal_output.observable,out.observable));
 close(temporal_output.measurement_variance(3),out.measurement_variance(3),1e-10);
 assert(strcmp(temporal_output.quality.altitude,'CONSISTENT'));
+% Географический выход относится к текущему состоянию после удаления старой опоры.
+reduced=temporal_control; reduced.geometry.scales=ones(42,1);
+reduced.geometry.history.H={[zeros(2,21) control.geometry.H],zeros(0,21)};
+reduced.geometry.history.transitions={[zeros(21) eye(21)]};
+reduced_output=nav_geodetic_output(s,eye(21),e,reduced);
+assert(isequal(reduced_output.observable,out.observable));
+close(reduced_output.measurement_variance(3),out.measurement_variance(3),1e-10);
+
 bad_control=temporal_control; bad_control.geometry.history.times(end)=s.t-1;
 fails(@()nav_geodetic_output(s,eye(21),e,bad_control),'libekf:WatchOutput');
 bad_control=temporal_control; bad_control.geometry.history.frame_id='another_frame';
